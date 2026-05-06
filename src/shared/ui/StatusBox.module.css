@@ -1,0 +1,47 @@
+.box {
+  display: grid;
+  place-items: center;
+  gap: 1rem;
+  min-height: 220px;
+  padding: 2rem;
+  text-align: center;
+  border: 1px dashed rgba(21, 61, 69, 0.25);
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 3.2rem;
+  height: 3.2rem;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: 1.3rem;
+}
+
+.loading {
+  background: rgba(217, 131, 36, 0.18);
+  color: #bc6c1d;
+}
+
+.error {
+  background: rgba(176, 56, 44, 0.14);
+  color: #972e28;
+}
+
+.empty {
+  background: rgba(21, 61, 69, 0.08);
+  color: #264d56;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.description {
+  margin: 0.45rem 0 0;
+  color: var(--text-muted);
+  max-width: 42rem;
+}

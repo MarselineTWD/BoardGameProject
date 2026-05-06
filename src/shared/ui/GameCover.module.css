@@ -1,0 +1,7 @@
+.cover {
+  width: 100%;
+  height: 152px;
+  object-fit: cover;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #173f48, #c77127);
+}

@@ -1,0 +1,22 @@
+.stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.starButton,
+.starText {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 1.05rem;
+  color: rgba(18, 57, 66, 0.2);
+}
+
+.starButton {
+  cursor: pointer;
+}
+
+.active {
+  color: #d98324;
+}

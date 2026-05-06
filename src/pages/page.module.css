@@ -1,0 +1,279 @@
+.page {
+  display: grid;
+  gap: 1.2rem;
+}
+
+.metrics {
+  display: grid;
+  gap: 1rem;
+}
+
+.metricCard {
+  padding: 1rem;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(18, 57, 66, 0.1);
+}
+
+.metricValue {
+  margin: 0;
+  font-size: clamp(1.8rem, 3vw, 2.5rem);
+  font-weight: 800;
+  color: #153d45;
+}
+
+.metricLabel {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+}
+
+.gridTwo {
+  display: grid;
+  gap: 1rem;
+}
+
+.gridThree {
+  display: grid;
+  gap: 1rem;
+}
+
+.list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.gameCard {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: minmax(96px, 128px) 1fr;
+}
+
+.gameCover {
+  width: 100%;
+  height: 152px;
+  object-fit: cover;
+  border-radius: 18px;
+}
+
+.gameTitle {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.statsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  color: var(--text-muted);
+}
+
+.formGrid {
+  display: grid;
+  gap: 1rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.reviewCard {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(18, 57, 66, 0.1);
+}
+
+.historyGrid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.historyGrid div {
+  padding: 0.8rem;
+  border: 1px solid rgba(18, 57, 66, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 252, 245, 0.76);
+}
+
+.historyGrid strong {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: #153d45;
+}
+
+.historyGrid p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.playerRow {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(18, 57, 66, 0.1);
+}
+
+.playerRow button {
+  justify-self: start;
+}
+
+.playerRowCompact {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.leaderboardRank {
+  font-weight: 900;
+  color: #c16429;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 999px;
+  color: #fff;
+  font-weight: 900;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.progressionCard {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.keyFacts {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.fact {
+  padding: 0.95rem;
+  border-radius: 16px;
+  background: rgba(18, 57, 66, 0.05);
+}
+
+.factLabel {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+}
+
+.factValue {
+  font-weight: 800;
+}
+
+.steps {
+  display: grid;
+  gap: 0.8rem;
+  counter-reset: step;
+}
+
+.step {
+  display: grid;
+  gap: 0.45rem;
+  padding: 1rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(18, 57, 66, 0.1);
+}
+
+.step::before {
+  counter-increment: step;
+  content: 'Шаг ' counter(step);
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: #c16429;
+  text-transform: uppercase;
+}
+
+.warningList {
+  display: grid;
+  gap: 0.6rem;
+  padding-left: 1.1rem;
+  color: var(--text-muted);
+}
+
+.filterBar {
+  display: grid;
+  gap: 1rem;
+}
+
+.catalogGrid {
+  display: grid;
+  gap: 1rem;
+}
+
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.pagination label {
+  min-width: 9rem;
+}
+
+@media (min-width: 720px) {
+  .metrics {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .gridTwo {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gridThree {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .historyGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .formGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .filterBar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .catalogGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .playerRow {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+  }
+
+  .playerRowCompact {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+}
