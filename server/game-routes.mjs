@@ -13,6 +13,7 @@ import {
 const MAX_THEME_LENGTH = 500;
 const MAX_MESSAGE_LENGTH = 1600;
 const MAX_REVISION_WISH_LENGTH = 1000;
+const MAX_AI_PARSE_RETRIES = 3;
 const ALLOWED_COMMANDS = new Set([
   '/state',
   '/character',
@@ -3514,16 +3515,39 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         request.body.roll_result?.rerolls_spent ?? 0,
       );
 
-      const processed = await service.processGameAction(
+      const actionPayload = {
+        content,
+        choice: request.body.choice ?? null,
+        roll_result: request.body.roll_result ?? null,
+      };
+
+      let processed = await service.processGameAction(
         sessionId,
         playerId,
         characterId,
-        {
-          content,
-          choice: request.body.choice ?? null,
-          roll_result: request.body.roll_result ?? null,
-        },
+        actionPayload,
       );
+
+      let retryCount = 0;
+      while (processed.parseError && retryCount < MAX_AI_PARSE_RETRIES) {
+        retryCount += 1;
+        console.warn(
+          '[DeepSeek] processGameAction auto-retry after parse_error',
+          JSON.stringify({
+            session_id: sessionId,
+            player_id: playerId,
+            character_id: characterId,
+            retry: retryCount,
+            action_preview: String(content).slice(0, 120),
+          }),
+        );
+        processed = await service.processGameAction(
+          sessionId,
+          playerId,
+          characterId,
+          actionPayload,
+        );
+      }
       const gmMessage = await createGameMessage(pool, {
         session_id: sessionId,
         role: 'gm',

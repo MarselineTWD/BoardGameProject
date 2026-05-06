@@ -100,6 +100,123 @@ function fallbackGameMasterResponse() {
   };
 }
 
+function toSafeString(value, fallback = '') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
+}
+
+function toSafeNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function toSafeBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    if (value.toLowerCase() === 'true') {
+      return true;
+    }
+    if (value.toLowerCase() === 'false') {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function coerceRoll(roll) {
+  if (!roll || typeof roll !== 'object') {
+    return null;
+  }
+
+  return {
+    dice: toSafeString(roll.dice, 'd20'),
+    stat: toSafeString(roll.stat, 'perception'),
+    skill_id: roll.skill_id == null ? null : toSafeString(roll.skill_id),
+    difficulty: toSafeNumber(roll.difficulty, 12),
+    success_condition: toSafeString(roll.success_condition, 'total >= difficulty'),
+    reason: toSafeString(roll.reason, 'Проверка по действию персонажа'),
+    success_hint: toSafeString(roll.success_hint, 'Действие удаётся'),
+    failure_hint: toSafeString(roll.failure_hint, 'Действие усложняется'),
+  };
+}
+
+function coerceChoice(choice, index = 0) {
+  if (!choice || typeof choice !== 'object') {
+    return fallbackChoice();
+  }
+
+  const requiresRoll = toSafeBoolean(choice.requires_roll, Boolean(choice.roll));
+  return {
+    id: toSafeString(choice.id, `choice_${index + 1}`),
+    label: toSafeString(choice.label, `Действие ${index + 1}`),
+    player_text: toSafeString(
+      choice.player_text,
+      toSafeString(choice.label, 'Я действую по ситуации.'),
+    ),
+    type: toSafeString(choice.type, 'action'),
+    requires_roll: requiresRoll,
+    roll: requiresRoll ? coerceRoll(choice.roll) : null,
+  };
+}
+
+function extractStatePatchFromTaggedText(rawText) {
+  const text = String(rawText ?? '');
+  const match = text.match(/<STATE_PATCH>\s*([\s\S]*?)\s*<\/STATE_PATCH>/i);
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return StatePatchSchema.parse(parseJsonLoose(match[1]));
+  } catch {
+    return null;
+  }
+}
+
+function coerceGameMasterResponse(parsed, rawText = '') {
+  const message =
+    parsed?.message && typeof parsed.message === 'object'
+      ? parsed.message
+      : {
+          speaker: parsed?.speaker ?? 'Ведущий',
+          text:
+            parsed?.text ??
+            parsed?.narration ??
+            parsed?.response ??
+            parsed?.reply ??
+            '',
+        };
+  const choicesSource = Array.isArray(parsed?.choices)
+    ? parsed.choices
+    : Array.isArray(parsed?.options)
+      ? parsed.options
+      : [];
+  const choices = choicesSource.length
+    ? choicesSource.map((choice, index) => coerceChoice(choice, index))
+    : [fallbackChoice()];
+  const statePatch =
+    parsed?.state_patch ??
+    parsed?.statePatch ??
+    extractStatePatchFromTaggedText(rawText) ??
+    { changed: false, updates: {} };
+  const mapPatch = parsed?.map_patch ?? parsed?.mapPatch ?? { changed: false, updates: {} };
+
+  return {
+    message: {
+      speaker: toSafeString(message?.speaker, 'Ведущий'),
+      text: toSafeString(
+        message?.text,
+        'Сцена замирает на мгновение. Что вы сделаете дальше?',
+      ),
+    },
+    choices,
+    state_patch: statePatch,
+    map_patch: mapPatch,
+  };
+}
+
 function gameGenre(game) {
   const title = `${game?.title ?? ''} ${game?.description ?? ''}`.toLowerCase();
 
@@ -372,8 +489,32 @@ export function parseDeepSeekGameResponse(rawText) {
       mapPatch: result.map_patch ?? { changed: false, updates: {} },
       parseError: false,
     };
-  } catch {
-    return fallbackGameMasterResponse();
+  } catch (strictError) {
+    try {
+      const looseParsed = parseJsonLoose(stripMarkdownJson(rawText));
+      const coerced = coerceGameMasterResponse(looseParsed, rawText);
+      const result = GameMasterResponseSchema.parse(coerced);
+      const messageText = String(result.message?.text ?? '').trim();
+      const choices = result.choices.length ? result.choices : [fallbackChoice()];
+      console.warn(
+        '[DeepSeek] parseDeepSeekGameResponse recovered via coercion:',
+        strictError instanceof Error ? strictError.message : 'unknown error',
+      );
+      return {
+        message: {
+          speaker: String(result.message?.speaker ?? 'Ведущий').trim() || 'Ведущий',
+          text:
+            messageText ||
+            'Сцена замирает на мгновение. Что вы сделаете дальше?',
+        },
+        choices,
+        statePatch: result.state_patch ?? { changed: false, updates: {} },
+        mapPatch: result.map_patch ?? { changed: false, updates: {} },
+        parseError: false,
+      };
+    } catch {
+      return fallbackGameMasterResponse();
+    }
   }
 }
 
@@ -1196,7 +1337,7 @@ ${wish}
 
     const raw = await this.complete(messages, {
       json: true,
-      temperature: 0.55,
+      temperature: 0.35,
       maxTokens: this.maxOutputTokens,
       purpose: 'processGameAction',
     });
