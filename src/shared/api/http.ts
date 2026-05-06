@@ -58,15 +58,20 @@ async function requestJson<T>(
 }
 
 export function getAuthToken() {
-  return window.localStorage.getItem(authTokenKey);
+  return (
+    window.sessionStorage.getItem(authTokenKey) ??
+    window.localStorage.getItem(authTokenKey)
+  );
 }
 
 export function setAuthToken(token: string) {
+  window.sessionStorage.setItem(authTokenKey, token);
   window.localStorage.setItem(authTokenKey, token);
   window.dispatchEvent(new Event('meeple-scope-auth'));
 }
 
 export function clearAuthToken() {
+  window.sessionStorage.removeItem(authTokenKey);
   window.localStorage.removeItem(authTokenKey);
   window.dispatchEvent(new Event('meeple-scope-auth'));
 }

@@ -33,7 +33,46 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.set('io', io);
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
+  const token =
+    typeof socket.handshake.auth?.token === 'string'
+      ? socket.handshake.auth.token
+      : '';
+
+  if (token) {
+    try {
+      const result = await pool.query(
+        `
+          SELECT u.id
+          FROM auth_sessions s
+          JOIN app_users u ON u.id = s.user_id
+          WHERE s.token_hash = $1 AND s.expires_at > now()
+        `,
+        [hashToken(token)],
+      );
+      const user = result.rows[0];
+
+      if (user) {
+        socket.data.userId = user.id;
+        socket.join(`user:${user.id}`);
+      }
+    } catch (error) {
+      console.warn(
+        'Socket auth failed:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  socket.on('join-user', (userId) => {
+    if (
+      socket.data.userId &&
+      String(socket.data.userId) === String(userId ?? '').trim()
+    ) {
+      socket.join(`user:${socket.data.userId}`);
+    }
+  });
+
   socket.on('join-game-session', (sessionId) => {
     if (typeof sessionId === 'string' && sessionId.trim()) {
       socket.join(`game:${sessionId.trim()}`);
@@ -46,6 +85,10 @@ io.on('connection', (socket) => {
     }
   });
 });
+
+function emitToUser(userId, event, payload) {
+  io.to(`user:${userId}`).emit(event, payload);
+}
 
 function asyncRoute(handler) {
   return async (request, response, next) => {
@@ -774,6 +817,82 @@ async function getLobbyState(ownerUserId) {
   };
 }
 
+async function listPendingLobbyInvitations(userId) {
+  const result = await pool.query(
+    `
+      SELECT
+        invite.value AS invitation,
+        s.id AS session_id,
+        s.title AS session_title,
+        s.genre,
+        s.tone,
+        s.updated_at,
+        owner_user.id AS owner_id,
+        owner_user.name AS owner_name,
+        owner_user.username AS owner_username
+      FROM game_states gs
+      JOIN game_sessions s ON s.id = gs.session_id
+      LEFT JOIN app_users owner_user
+        ON owner_user.id::text = gs.public_state_json ->> 'owner_player_id'
+      CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(gs.public_state_json -> 'lobby_invitations', '[]'::jsonb)
+      ) AS invite(value)
+      WHERE invite.value ->> 'to_player_id' = $1
+        AND invite.value ->> 'status' = 'pending'
+        AND s.status <> 'finished'
+      ORDER BY s.updated_at DESC
+    `,
+    [String(userId)],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.invitation.id,
+    sessionId: row.session_id,
+    sessionTitle: row.session_title,
+    genre: row.genre,
+    tone: row.tone,
+    createdAt: row.invitation.created_at,
+    updatedAt: row.updated_at,
+    fromUser: {
+      id: row.owner_id,
+      name: row.owner_name,
+      username: row.owner_username,
+    },
+  }));
+}
+
+async function getNotifications(userId) {
+  const friendRequests = await pool.query(
+    `
+      SELECT
+        fr.*,
+        from_user.name AS from_name,
+        from_user.username AS from_username,
+        from_user.friend_code AS from_friend_code,
+        from_user.rating AS from_rating,
+        from_user.avatar_color AS from_avatar_color,
+        to_user.name AS to_name,
+        to_user.username AS to_username,
+        to_user.friend_code AS to_friend_code,
+        to_user.rating AS to_rating,
+        to_user.avatar_color AS to_avatar_color
+      FROM friend_requests fr
+      JOIN app_users from_user ON from_user.id = fr.from_user_id
+      JOIN app_users to_user ON to_user.id = fr.to_user_id
+      WHERE fr.to_user_id = $1 AND fr.status = 'pending'
+      ORDER BY fr.created_at DESC
+    `,
+    [userId],
+  );
+  const lobbyInvitations = await listPendingLobbyInvitations(userId);
+
+  return {
+    friendRequests: friendRequests.rows.map(toFriendRequest),
+    lobbyInvitations,
+    unreadCount: friendRequests.rows.length + lobbyInvitations.length,
+  };
+}
+
 app.get(
   '/',
   asyncRoute(async (_request, response) => {
@@ -934,6 +1053,13 @@ app.get(
   }),
 );
 
+app.get(
+  '/notifications',
+  requireAuth(async (request, response) => {
+    response.json(await getNotifications(request.authUser.id));
+  }),
+);
+
 app.post(
   '/friend-requests',
   requireAuth(async (request, response) => {
@@ -1003,6 +1129,16 @@ app.post(
       [request.authUser.id, target.id],
     );
 
+    emitToUser(target.id, 'notification-created', {
+      type: 'friend_request',
+      requestId: created.rows[0].id,
+      fromUserId: request.authUser.id,
+    });
+    emitToUser(request.authUser.id, 'notifications-updated', {
+      type: 'friend_request_sent',
+      requestId: created.rows[0].id,
+    });
+
     response.status(201).json({ id: created.rows[0].id });
   }),
 );
@@ -1060,6 +1196,17 @@ app.patch(
       await pool.query('ROLLBACK');
       throw error;
     }
+
+    emitToUser(friendRequest.from_user_id, 'notifications-updated', {
+      type: 'friend_request_responded',
+      requestId: friendRequest.id,
+      status,
+    });
+    emitToUser(friendRequest.to_user_id, 'notifications-updated', {
+      type: 'friend_request_responded',
+      requestId: friendRequest.id,
+      status,
+    });
 
     response.json({ status });
   }),

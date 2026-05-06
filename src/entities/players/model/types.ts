@@ -73,3 +73,24 @@ export interface LobbyState {
   members: LobbyMember[];
   availablePlayers: Player[];
 }
+
+export interface LobbyInvitationNotification {
+  id: string;
+  sessionId: string;
+  sessionTitle: string;
+  genre: string;
+  tone: string;
+  createdAt: string;
+  updatedAt: string;
+  fromUser: {
+    id: number | null;
+    name: string;
+    username: string;
+  };
+}
+
+export interface NotificationsState {
+  friendRequests: FriendRequest[];
+  lobbyInvitations: LobbyInvitationNotification[];
+  unreadCount: number;
+}

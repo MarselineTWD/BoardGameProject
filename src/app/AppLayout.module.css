@@ -65,6 +65,86 @@
   gap: 0.7rem;
 }
 
+.notifications {
+  position: relative;
+}
+
+.notificationButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 40px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(18, 57, 66, 0.14);
+  border-radius: 999px;
+  color: #17363f;
+  cursor: pointer;
+  background: rgba(255, 252, 245, 0.9);
+  font-weight: 900;
+}
+
+.notificationButton span {
+  display: grid;
+  place-items: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  color: #fff;
+  background: #bc6124;
+  font-size: 0.78rem;
+}
+
+.notificationPanel {
+  position: absolute;
+  top: calc(100% + 0.55rem);
+  right: 0;
+  z-index: 60;
+  display: grid;
+  gap: 0.7rem;
+  width: min(360px, calc(100vw - 2rem));
+  padding: 0.85rem;
+  border: 1px solid rgba(18, 57, 66, 0.14);
+  border-radius: 12px;
+  color: #17363f;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 20px 46px rgba(18, 57, 66, 0.18);
+}
+
+.notificationPanel > strong {
+  font-size: 1rem;
+}
+
+.notificationPanel article {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.7rem;
+  border: 1px solid rgba(18, 57, 66, 0.1);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.notificationPanel article p {
+  margin: 0;
+  color: #43575d;
+}
+
+.notificationPanel article div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.notificationPanel article a {
+  width: fit-content;
+  color: #bc6124;
+  font-weight: 900;
+}
+
+.notificationEmpty {
+  margin: 0;
+  color: #5c7480;
+}
+
 .navGroup {
   position: relative;
 }
@@ -148,6 +228,11 @@
 
   .nav {
     justify-content: flex-start;
+  }
+
+  .notificationPanel {
+    right: auto;
+    left: 0;
   }
 
   .navLink {

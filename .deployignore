@@ -1,0 +1,15 @@
+.git
+.gitignore
+node_modules
+src
+dist
+*.log
+*.err.log
+.env
+.env.local
+.env.development
+.env.production
+coverage
+.cache
+.vite
+*.tsbuildinfo

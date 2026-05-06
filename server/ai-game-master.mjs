@@ -276,6 +276,68 @@ function fallbackLobbyScenario({ game, theme }) {
   });
 }
 
+function fallbackRevisedLobbyScenario({
+  game,
+  currentScenario,
+  gameState,
+  mapState,
+  choices,
+  wish,
+}) {
+  const fallback = fallbackLobbyScenario({
+    game,
+    theme: currentScenario?.theme ?? currentScenario?.short_description ?? game.title,
+  });
+  const safeChoices = Array.isArray(choices) && choices.length ? choices : fallback.choices;
+  const safeFacts = uniqueStrings([
+    ...(Array.isArray(gameState?.known_facts) ? gameState.known_facts : []),
+    `Запрошена правка сценария: ${String(wish ?? '').slice(0, 180)}`,
+  ]);
+
+  return DeepSeekScenarioResponseSchema.parse({
+    scenario: {
+      id: currentScenario?.id ?? fallback.scenario.id,
+      title: currentScenario?.title ?? fallback.scenario.title,
+      game_id: game.id,
+      genre: currentScenario?.genre ?? fallback.scenario.genre,
+      tone: currentScenario?.tone ?? fallback.scenario.tone,
+      theme: currentScenario?.theme ?? fallback.scenario.theme,
+      short_description:
+        currentScenario?.short_description ?? fallback.scenario.short_description,
+      main_conflict: currentScenario?.main_conflict ?? fallback.scenario.main_conflict,
+      starting_scene: currentScenario?.starting_scene ?? fallback.scenario.starting_scene,
+      current_goal:
+        currentScenario?.current_goal ??
+        gameState?.current_goal ??
+        fallback.scenario.current_goal,
+    },
+    characters: [],
+    initial_message: {
+      speaker: 'Ведущий',
+      text:
+        'Я учёл пожелание к сценарию. Продолжаем игру: при необходимости можно уточнить правку ещё раз.',
+    },
+    choices: safeChoices,
+    game_state: {
+      ...fallback.game_state,
+      ...(gameState ?? {}),
+      known_facts: safeFacts,
+      current_goal:
+        gameState?.current_goal ??
+        currentScenario?.current_goal ??
+        fallback.game_state.current_goal,
+      current_scene:
+        gameState?.current_scene ??
+        currentScenario?.starting_scene ??
+        fallback.game_state.current_scene,
+    },
+    map_state:
+      mapState && typeof mapState === 'object' && !Array.isArray(mapState)
+        ? { ...fallback.map_state, ...mapState }
+        : fallback.map_state,
+  });
+}
+
 function parseJsonStrictWithRepair(raw) {
   const cleaned = stripMarkdownJson(raw);
 
@@ -448,6 +510,38 @@ function toCharacterContext(row) {
     x: Number(row.x),
     y: Number(row.y),
     is_active: row.is_active,
+  };
+}
+
+function withCharacterFate(character) {
+  const hpCurrent = Number(character.hp_current ?? character.derived?.hp_current ?? 10);
+  const statuses = Array.isArray(character.status_effects)
+    ? character.status_effects
+    : [];
+  const alreadyMarked = statuses.some((status) => {
+    const text =
+      typeof status === 'string'
+        ? status
+        : `${status?.id ?? ''} ${status?.name ?? ''}`;
+    return /dead|погиб|выбыл|смерт/i.test(text);
+  });
+
+  if (hpCurrent > 0 || alreadyMarked) {
+    return character;
+  }
+
+  return {
+    ...character,
+    is_active: false,
+    status_effects: [
+      ...statuses,
+      {
+        id: 'dead',
+        name: 'Погиб',
+        description:
+          'Персонаж окончательно выбыл из истории. Описание остаётся без графичных подробностей.',
+      },
+    ],
   };
 }
 
@@ -626,7 +720,6 @@ export class AiGameMasterService {
         ],
         {
           json: true,
-          disableJsonMode: true,
           temperature: 0.35,
           maxTokens: this.lobbyMaxOutputTokens,
           retryMaxTokens: Math.min(4200, this.lobbyMaxOutputTokens),
@@ -715,6 +808,9 @@ ${game.description}
 
 Текущий сценарий:
 ${JSON.stringify(currentScenario, null, 2)}
+
+ID отдельного онлайн-чата этой партии:
+${currentScenario?.deepseek_chat_id ?? currentScenario?.id ?? 'session'}
 
 Текущее состояние сцены:
 ${JSON.stringify(gameState ?? {}, null, 2)}
@@ -813,6 +909,17 @@ Choices должно быть от 3 до 5. Если действие риск�
         '[DeepSeek] scenario revision JSON failed:',
         error instanceof Error ? error.message : error,
       );
+      if (isRetryableDeepSeekError(error)) {
+        console.warn('[DeepSeek] fallback scenario revision applied');
+        return fallbackRevisedLobbyScenario({
+          game,
+          currentScenario,
+          gameState,
+          mapState,
+          choices,
+          wish,
+        });
+      }
       throw normalizeAiError(error, 'DeepSeek returned invalid scenario revision JSON');
     }
   }
@@ -1057,6 +1164,12 @@ ${wish}
           content: JSON.stringify({
             scenario: context.publicState.scenario ?? context.publicState.campaign,
             deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
+            online_session_scope: {
+              session_id: sessionId,
+              deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
+              isolation_policy:
+                'Эта игровая сессия является отдельным чатом. Не используй события, персонажей, память или скрытые заметки из других session_id.',
+            },
             selected_game: context.publicState.selected_game ?? null,
             characters: context.characters,
             current_active_character: context.currentCharacter,
@@ -1117,6 +1230,12 @@ ${wish}
           role: 'user',
           content: JSON.stringify({
             selected_game: publicState.selected_game ?? null,
+            online_session_scope: {
+              session_id: sessionId,
+              deepseek_chat_id: publicState.deepseek_chat_id ?? sessionId,
+              isolation_policy:
+                'Отвечай только по этой игровой сессии; другие лобби являются отдельными чатами.',
+            },
             scenario: publicState.scenario ?? publicState.campaign ?? null,
             current_goal:
               publicState.game_state?.current_goal ?? context.session.current_goal,
@@ -1493,7 +1612,8 @@ ${wish}
   }
 
   async applyCharacterPatches(client, sessionId, characters) {
-    for (const character of characters) {
+    for (const rawCharacter of characters) {
+      const character = withCharacterFate(rawCharacter);
       const fields = {
         hp_current: character.hp_current,
         hp_max: character.hp_max,
@@ -1502,7 +1622,10 @@ ${wish}
         location_id: character.location_id,
         x: character.x,
         y: character.y,
-        is_active: character.is_active,
+        is_active:
+          character.hp_current !== undefined && Number(character.hp_current) <= 0
+            ? false
+            : character.is_active,
       };
       const assignments = [];
       const values = [];

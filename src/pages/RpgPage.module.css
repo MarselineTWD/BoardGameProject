@@ -49,6 +49,40 @@
   font-weight: 900;
 }
 
+.pendingInvites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.pendingInvites span,
+.deadBadge {
+  width: fit-content;
+  padding: 0.28rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.pendingInvites span {
+  color: #7a4a1d;
+  background: rgba(255, 241, 214, 0.9);
+  border: 1px solid rgba(189, 115, 44, 0.22);
+}
+
+.deadBadge {
+  color: #fffaf0 !important;
+  background: #8f2f2f;
+}
+
+.invitationActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.65rem;
+}
+
 .friendInviteBox,
 .inviteRow {
   display: flex;
@@ -341,6 +375,31 @@
   background: rgba(255, 252, 245, 0.76);
 }
 
+.assignControl {
+  display: grid;
+  gap: 0.38rem;
+  padding: 0.7rem;
+  border: 1px solid rgba(18, 57, 66, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 252, 245, 0.76);
+}
+
+.assignControl span {
+  color: #5c7480;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.assignControl select {
+  width: 100%;
+  padding: 0.58rem 0.65rem;
+  border: 1px solid rgba(18, 57, 66, 0.14);
+  border-radius: 8px;
+  color: #17363f;
+  background: rgba(255, 255, 255, 0.86);
+  outline: none;
+}
+
 .revisionBox label {
   display: grid;
   gap: 0.4rem;
@@ -417,12 +476,38 @@
 }
 
 .message {
+  position: relative;
   width: min(94%, 980px);
   justify-self: end;
   padding: 1rem;
   border-radius: 22px 22px 6px 22px;
   border: 1px solid rgba(18, 57, 66, 0.1);
   background: rgba(255, 255, 255, 0.8);
+}
+
+.messageSelect {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.55rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.messageSelect input {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+}
+
+.messageSelectZone {
+  position: absolute;
+  top: 0;
+  right: -0.55rem;
+  width: 1.1rem;
+  height: 100%;
+  cursor: cell;
 }
 
 .gmMessage {

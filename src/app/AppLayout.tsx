@@ -1,8 +1,16 @@
 import { Link, Outlet } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
+import { io } from 'socket.io-client';
 import { useAuth } from '../entities/auth/hooks/useAuth';
 import { rpgService } from '../entities/rpg/api/rpg.service';
 import { GameSessionListItem } from '../entities/rpg/model/types';
+import {
+  notificationsService,
+  playersService,
+} from '../entities/players/api/players.service';
+import { NotificationsState } from '../entities/players/model/types';
+import { getAuthToken, localApiBase } from '../shared/api/http';
+import { Button } from '../shared/ui/Button';
 import styles from './AppLayout.module.css';
 
 const navigationGroups = [
@@ -37,18 +45,59 @@ const navigationGroups = [
 export function AppLayout() {
   const { user } = useAuth();
   const [sessions, setSessions] = useState<GameSessionListItem[]>([]);
+  const [notifications, setNotifications] = useState<NotificationsState | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   useEffect(() => {
     if (!user) {
       setSessions([]);
+      setNotifications(null);
       return;
     }
 
-    void rpgService
-      .listSessions(String(user.id))
-      .then(setSessions)
-      .catch(() => setSessions([]));
+    const reload = () => {
+      void rpgService
+        .listSessions(String(user.id))
+        .then(setSessions)
+        .catch(() => setSessions([]));
+      void notificationsService
+        .get()
+        .then(setNotifications)
+        .catch(() => setNotifications(null));
+    };
+
+    reload();
+
+    const socket = io(localApiBase, {
+      auth: { token: getAuthToken() ?? '' },
+      transports: ['websocket', 'polling'],
+    });
+    socket.emit('join-user', user.id);
+    socket.on('notification-created', reload);
+    socket.on('notifications-updated', reload);
+
+    return () => {
+      socket.disconnect();
+    };
   }, [user]);
+
+  const respondFriendRequest = async (
+    id: number,
+    status: 'accepted' | 'declined',
+  ) => {
+    await playersService.respondFriendRequest(id, status);
+    setNotifications(await notificationsService.get());
+  };
+
+  const respondLobbyInvitation = async (
+    sessionId: string,
+    invitationId: string,
+    status: 'accepted' | 'declined',
+  ) => {
+    await rpgService.respondLobbyInvitation(sessionId, invitationId, status);
+    setNotifications(await notificationsService.get());
+    setSessions(user ? await rpgService.listSessions(String(user.id)) : []);
+  };
 
   const currentLobby = useMemo(
     () =>
@@ -115,6 +164,90 @@ export function AppLayout() {
             </div>
           ))}
         </nav>
+        {user ? (
+          <div className={styles.notifications}>
+            <button
+              type="button"
+              className={styles.notificationButton}
+              onClick={() => setNotificationsOpen((current) => !current)}
+            >
+              Уведомления
+              {notifications?.unreadCount ? (
+                <span>{notifications.unreadCount}</span>
+              ) : null}
+            </button>
+            {notificationsOpen ? (
+              <div className={styles.notificationPanel}>
+                <strong>Уведомления</strong>
+                {notifications?.friendRequests.length ? (
+                  notifications.friendRequests.map((request) => (
+                    <article key={`friend-${request.id}`}>
+                      <p>{request.fromUser.name} хочет добавить вас в друзья.</p>
+                      <div>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => void respondFriendRequest(request.id, 'declined')}
+                        >
+                          Отклонить
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() => void respondFriendRequest(request.id, 'accepted')}
+                        >
+                          Принять
+                        </Button>
+                      </div>
+                    </article>
+                  ))
+                ) : null}
+                {notifications?.lobbyInvitations.length ? (
+                  notifications.lobbyInvitations.map((invite) => (
+                    <article key={`lobby-${invite.id}`}>
+                      <p>
+                        {invite.fromUser.name || 'Ведущий'} приглашает в лобби
+                        "{invite.sessionTitle}".
+                      </p>
+                      <div>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() =>
+                            void respondLobbyInvitation(
+                              invite.sessionId,
+                              invite.id,
+                              'declined',
+                            )
+                          }
+                        >
+                          Отклонить
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() =>
+                            void respondLobbyInvitation(
+                              invite.sessionId,
+                              invite.id,
+                              'accepted',
+                            )
+                          }
+                        >
+                          Принять
+                        </Button>
+                      </div>
+                      <a href={`/lobby?session=${encodeURIComponent(invite.sessionId)}`}>
+                        Открыть лобби
+                      </a>
+                    </article>
+                  ))
+                ) : null}
+                {!notifications?.unreadCount ? (
+                  <p className={styles.notificationEmpty}>Новых уведомлений нет.</p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </header>
 
       <main className={styles.main}>

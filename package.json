@@ -11,7 +11,8 @@
     "format": "prettier --write .",
     "api": "node server/index.mjs",
     "db:migrate": "node server/migrate.mjs",
-    "db:seed": "node server/seed.mjs"
+    "db:seed": "node server/seed.mjs",
+    "deploy:prepare": "node scripts/prepare-deploy.mjs"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.114.18",

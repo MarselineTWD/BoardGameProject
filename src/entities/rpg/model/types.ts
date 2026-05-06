@@ -72,6 +72,7 @@ export interface GameCharacter {
   y: number;
   is_active: boolean;
   is_player_character: boolean;
+  is_dead?: boolean;
 }
 
 export interface CampaignCharacterTemplate {
@@ -317,6 +318,18 @@ export interface GameStateMemory {
       name: string;
       username?: string;
       role?: string;
+    }[];
+    lobby_invitations?: {
+      id: string;
+      session_id?: string;
+      from_player_id: string;
+      from_name?: string;
+      to_player_id: string;
+      to_name?: string;
+      to_username?: string;
+      status: 'pending' | 'accepted' | 'declined';
+      created_at: string;
+      responded_at?: string | null;
     }[];
     deepseek_chat_id?: string;
     selected_game?: AvailableGame;

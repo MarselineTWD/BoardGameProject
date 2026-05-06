@@ -25,7 +25,6 @@ import {
   MapToken,
   GameMessage,
   GameSessionResponse,
-  MapArea,
   RollCheck,
   RollResult,
   StatKey,
@@ -33,7 +32,7 @@ import {
 import { useAuth } from '../entities/auth/hooks/useAuth';
 import { playersService } from '../entities/players/api/players.service';
 import { Player } from '../entities/players/model/types';
-import { localApiBase } from '../shared/api/http';
+import { getAuthToken, localApiBase } from '../shared/api/http';
 import { browserLogger } from '../shared/lib/browserLogger';
 import { Button } from '../shared/ui/Button';
 import { Field } from '../shared/ui/Field';
@@ -99,6 +98,25 @@ function actorName(session: GameSessionResponse | null) {
   return actor?.name ?? session.session.current_actor_id;
 }
 
+function sessionBusyStatus(label?: string) {
+  switch (label) {
+    case 'character_generation':
+      return 'Ведущий генерирует персонажа. Изменения появятся у всех игроков сразу после завершения.';
+    case 'character_revision':
+      return 'Ведущий изменяет персонажа. Дождитесь ответа, чтобы не отправить вторую генерацию.';
+    case 'scenario_revision':
+      return 'Ведущий переписывает сценарий. Обновление скоро появится у всех участников.';
+    case 'game_action':
+      return 'Ведущий обрабатывает действие игрока. Следующий запрос дождётся своей очереди.';
+    case 'session_start':
+      return 'Партия запускается. Состояние лобби обновится у всех участников.';
+    case 'session_finish':
+      return 'Партия завершается. История сохраняется для всех участников.';
+    default:
+      return 'Ведущий работает над лобби. Обновление появится у всех участников сразу после завершения.';
+  }
+}
+
 function isCheckLine(line: string) {
   return /^(Проверка|Сложность|Бросок|Модификатор|Итог|Результат):/i.test(line);
 }
@@ -108,11 +126,21 @@ function MessageBubble({
   character,
   content,
   typing,
+  selectable,
+  selected,
+  onToggleSelect,
+  onSelectDragStart,
+  onSelectDragEnter,
 }: {
   message: GameMessage;
   character?: GameCharacter;
   content?: string;
   typing?: boolean;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (messageId: string) => void;
+  onSelectDragStart?: (messageId: string) => void;
+  onSelectDragEnter?: (messageId: string) => void;
 }) {
   const isGm = message.role === 'gm';
   const lines = (content ?? message.content).split('\n');
@@ -123,6 +151,25 @@ function MessageBubble({
         typing ? styles.typingMessage : ''
       }`}
     >
+      {selectable ? (
+        <label className={styles.messageSelect}>
+          <input
+            type="checkbox"
+            checked={Boolean(selected)}
+            onChange={() => onToggleSelect?.(message.id)}
+          />
+        </label>
+      ) : null}
+      {selectable ? (
+        <div
+          className={styles.messageSelectZone}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            onSelectDragStart?.(message.id);
+          }}
+          onMouseEnter={() => onSelectDragEnter?.(message.id)}
+        />
+      ) : null}
       <div className={styles.messageMeta}>
         <span>{isGm ? 'Ведущий' : character?.name ?? 'Игрок'}</span>
         <time>{new Date(message.created_at).toLocaleTimeString('ru-RU')}</time>
@@ -146,19 +193,6 @@ type SelectedMapObject =
   | { kind: 'token'; token: MapToken }
   | { kind: 'location'; location: MapLocation }
   | { kind: 'route'; route: MapRoute };
-
-function escapeHtml(value: unknown) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
-function escapeSvg(value: unknown) {
-  return escapeHtml(value).replaceAll('\n', ' ');
-}
 
 function mapModeLabel(mapMode: string) {
   return mapMode === 'scene_map' ? 'Сцена / бой' : 'Регион / путешествие';
@@ -228,140 +262,6 @@ function dangerLabel(level?: number) {
   }
 
   return 'умеренно';
-}
-
-function toDataUri(svg: string) {
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
-}
-
-function findLocation(map: GameMapState, id: string) {
-  return map.locations.find((location) => location.id === id);
-}
-
-function routeCenter(map: GameMapState, route: MapRoute) {
-  const from = findLocation(map, route.from);
-  const to = findLocation(map, route.to);
-
-  if (!from || !to) {
-    return null;
-  }
-
-  return {
-    x: (from.x + to.x) / 2,
-    y: (from.y + to.y) / 2,
-  };
-}
-
-function routeOverlaySvg(map: GameMapState, mapMode: string, gridVisible: boolean) {
-  const routes = (map.routes ?? []).filter(
-    (route) => route.visible_to_players !== false,
-  );
-  const areas = (map.areas ?? map.zones ?? []).filter(
-    (area) => area.visible_to_players !== false,
-  );
-  const showSceneObjects = mapMode === 'scene_map';
-
-  const routeLines = routes
-    .map((route) => {
-      const from = findLocation(map, route.from);
-      const to = findLocation(map, route.to);
-
-      if (!from || !to) {
-        return '';
-      }
-
-      const danger = Math.min(10, Math.max(1, Number(route.danger_level ?? 1)));
-      const stroke = danger >= 7 ? '#9f2f2f' : danger >= 4 ? '#c97b2d' : '#365f55';
-
-      return `<path d="M ${from.x} ${from.y} L ${to.x} ${to.y}" fill="none" stroke="${stroke}" stroke-width="${mapMode === 'scene_map' ? 8 : 10}" stroke-linecap="round" stroke-dasharray="${danger >= 7 ? '22 14' : '0'}" opacity="0.78" />`;
-    })
-    .join('');
-
-  const areaShapes = areas
-    .map((area) => {
-      const fillByType: Record<string, string> = {
-        water: '#2d7180',
-        forest: '#3f6d42',
-        building: '#8b6a42',
-        hazard: '#a34032',
-        cover: '#5f5546',
-        wall: '#323c3e',
-        door: '#b87a31',
-      };
-      const fill = fillByType[area.type] ?? '#74634f';
-      const radius = area.type === 'wall' || area.type === 'door' ? 6 : 24;
-
-      return `<rect x="${area.x}" y="${area.y}" width="${area.width}" height="${area.height}" rx="${radius}" fill="${fill}" opacity="${area.type === 'wall' ? '0.86' : '0.44'}" stroke="#f3dfb2" stroke-width="3" />`;
-    })
-    .join('');
-
-  const sceneGrid =
-    showSceneObjects && map.grid?.enabled && gridVisible
-      ? `<defs><pattern id="scene-grid" width="${map.grid.cell_size}" height="${map.grid.cell_size}" patternUnits="userSpaceOnUse"><path d="M ${map.grid.cell_size} 0 L 0 0 0 ${map.grid.cell_size}" fill="none" stroke="#263c3d" stroke-width="1" opacity="0.24"/></pattern></defs><rect width="100%" height="100%" fill="url(#scene-grid)" opacity="0.7" />`
-      : '';
-
-  return toDataUri(`
-    <svg xmlns="http://www.w3.org/2000/svg" width="${map.width}" height="${map.height}" viewBox="0 0 ${map.width} ${map.height}">
-      ${sceneGrid}
-      ${areaShapes}
-      ${routeLines}
-    </svg>
-  `);
-}
-
-function generatedMapSvg(map: GameMapState, mapMode: string) {
-  const locations = map.locations.filter(
-    (location) => location.visible_to_players,
-  );
-  const regionLabels = locations
-    .map(
-      (location) => `
-        <g opacity="0.9">
-          <circle cx="${location.x}" cy="${location.y}" r="34" fill="#f4d48d" stroke="#533921" stroke-width="5"/>
-          <text x="${location.x}" y="${location.y + 62}" text-anchor="middle" font-family="Georgia, serif" font-size="34" fill="#2a352f" font-weight="700">${escapeSvg(location.name)}</text>
-        </g>
-      `,
-    )
-    .join('');
-
-  const sceneRooms =
-    mapMode === 'scene_map'
-      ? `
-        <rect x="${map.width * 0.08}" y="${map.height * 0.12}" width="${map.width * 0.34}" height="${map.height * 0.34}" rx="28" fill="#8b6a42" opacity="0.46" stroke="#2d3838" stroke-width="10"/>
-        <rect x="${map.width * 0.52}" y="${map.height * 0.16}" width="${map.width * 0.35}" height="${map.height * 0.28}" rx="28" fill="#6f7258" opacity="0.5" stroke="#2d3838" stroke-width="10"/>
-        <rect x="${map.width * 0.28}" y="${map.height * 0.58}" width="${map.width * 0.48}" height="${map.height * 0.24}" rx="28" fill="#594b3e" opacity="0.5" stroke="#2d3838" stroke-width="10"/>
-        <rect x="${map.width * 0.44}" y="${map.height * 0.05}" width="${map.width * 0.05}" height="${map.height * 0.9}" rx="8" fill="#27383a" opacity="0.62"/>
-        <circle cx="${map.width * 0.78}" cy="${map.height * 0.72}" r="${Math.min(map.width, map.height) * 0.09}" fill="#a34032" opacity="0.38"/>
-      `
-      : `
-        <path d="M ${map.width * 0.03} ${map.height * 0.64} C ${map.width * 0.24} ${map.height * 0.52}, ${map.width * 0.34} ${map.height * 0.82}, ${map.width * 0.56} ${map.height * 0.67} S ${map.width * 0.86} ${map.height * 0.42}, ${map.width * 0.98} ${map.height * 0.54}" fill="none" stroke="#2b7180" stroke-width="96" opacity="0.32"/>
-        <ellipse cx="${map.width * 0.18}" cy="${map.height * 0.28}" rx="${map.width * 0.16}" ry="${map.height * 0.18}" fill="#416d43" opacity="0.28"/>
-        <ellipse cx="${map.width * 0.78}" cy="${map.height * 0.24}" rx="${map.width * 0.15}" ry="${map.height * 0.16}" fill="#416d43" opacity="0.24"/>
-        <path d="M ${map.width * 0.12} ${map.height * 0.88} C ${map.width * 0.32} ${map.height * 0.7}, ${map.width * 0.64} ${map.height * 0.92}, ${map.width * 0.9} ${map.height * 0.74}" fill="none" stroke="#7f5430" stroke-width="28" stroke-linecap="round" opacity="0.35"/>
-      `;
-
-  return toDataUri(`
-    <svg xmlns="http://www.w3.org/2000/svg" width="${map.width}" height="${map.height}" viewBox="0 0 ${map.width} ${map.height}">
-      <defs>
-        <pattern id="paper" width="160" height="160" patternUnits="userSpaceOnUse">
-          <rect width="160" height="160" fill="#d6c29a"/>
-          <path d="M 0 120 C 40 90, 80 150, 160 110" fill="none" stroke="#8d7654" stroke-width="2" opacity="0.18"/>
-          <path d="M 12 28 L 148 20" stroke="#fff0bf" stroke-width="1" opacity="0.2"/>
-        </pattern>
-        <radialGradient id="light" cx="28%" cy="18%" r="82%">
-          <stop offset="0%" stop-color="#f2dfb2"/>
-          <stop offset="58%" stop-color="#c2a77d"/>
-          <stop offset="100%" stop-color="#79684b"/>
-        </radialGradient>
-      </defs>
-      <rect width="100%" height="100%" fill="url(#paper)"/>
-      <rect width="100%" height="100%" fill="url(#light)" opacity="0.55"/>
-      ${sceneRooms}
-      ${regionLabels}
-      <text x="56" y="76" font-family="Georgia, serif" font-size="38" fill="#263a39" font-weight="700">${escapeSvg(map.name)}</text>
-      <text x="58" y="122" font-family="Georgia, serif" font-size="22" fill="#5b4a32">${escapeSvg(map.visual_style ?? mapModeLabel(mapMode))}</text>
-    </svg>
-  `);
 }
 
 function SelectedMapPanel({
@@ -449,31 +349,6 @@ function tokenClassName(token: MapToken, isCurrent: boolean) {
   ]
     .filter(Boolean)
     .join(' ');
-}
-
-function labelText(label: unknown) {
-  if (typeof label === 'string') {
-    return label;
-  }
-
-  if (label && typeof label === 'object') {
-    const record = label as { text?: unknown; name?: unknown; title?: unknown };
-    return String(record.text ?? record.name ?? record.title ?? '');
-  }
-
-  return '';
-}
-
-function labelPoint(label: unknown) {
-  if (!label || typeof label !== 'object') {
-    return null;
-  }
-
-  const record = label as { x?: unknown; y?: unknown };
-  const x = Number(record.x);
-  const y = Number(record.y);
-
-  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 function stringArray(value: unknown) {
@@ -656,10 +531,6 @@ function RpgMap({
     () => (map ? resolveMapMode(map, sceneType) : 'region_map'),
     [map, sceneType],
   );
-  const backgroundUrl = useMemo(
-    () => (map ? map.image_url || generatedMapSvg(map, mapMode) : ''),
-    [map, mapMode],
-  );
   const visibleRoutes = useMemo(
     () => (map?.routes ?? []).filter((route) => route.visible_to_players !== false),
     [map?.routes],
@@ -683,13 +554,6 @@ function RpgMap({
     const zones = [...(map?.zones ?? []), ...(map?.areas ?? [])];
     return zones.filter((zone) => zone.visible_to_players !== false);
   }, [map?.areas, map?.zones]);
-  const visibleLabels = useMemo(
-    () =>
-      (map?.labels ?? [])
-        .map((label) => ({ text: labelText(label), point: labelPoint(label) }))
-        .filter((label) => label.text && label.point),
-    [map?.labels],
-  );
   const dangerLevel = useMemo(() => {
     const locationDanger = visibleLocations.map((location) =>
       Number(location.danger_level ?? 1),
@@ -1409,21 +1273,42 @@ function signed(value: number) {
 
 function safeGameError(error: unknown) {
   const message = error instanceof Error ? error.message : '';
+  const normalized = message.replace(/^Ошибка локального API:\s*/i, '').trim();
 
-  if (message.includes('Эта игра пока недоступна')) {
+  if (normalized.includes('Эта игра пока недоступна')) {
     return 'Эта игра пока недоступна для генерации сценария.';
   }
 
-  if (message.includes('Тематика слишком длинная')) {
+  if (normalized.includes('Тематика слишком длинная')) {
     return 'Тематика слишком длинная. Сократите описание.';
   }
 
-  if (message.includes('Войдите в аккаунт') || message.includes('Authentication')) {
+  if (normalized.includes('Войдите в аккаунт') || normalized.includes('Authentication')) {
     return 'Войдите в аккаунт, чтобы играть.';
   }
 
-  if (message.includes('Игра уже завершена')) {
+  if (normalized.includes('Игра уже завершена')) {
     return 'Игра уже завершена. История сохранена в аккаунте.';
+  }
+
+  if (normalized.includes('Это действие относится к другому персонажу')) {
+    return normalized;
+  }
+
+  if (normalized.includes('Этим персонажем сейчас нельзя действовать')) {
+    return normalized;
+  }
+
+  if (normalized.includes('Этот персонаж уже выбран')) {
+    return normalized;
+  }
+
+  if (normalized.includes('обрабатывается действие')) {
+    return normalized;
+  }
+
+  if (normalized && normalized !== message) {
+    return normalized;
   }
 
   return 'Ведущий на мгновение замолчал. Попробуйте повторить действие.';
@@ -1597,6 +1482,17 @@ function inventoryBonus(character: GameCharacter, roll: RollCheck) {
   ];
 
   return matches.some(Boolean) ? 1 : 0;
+}
+
+function requiredDiceTarget(
+  character: GameCharacter,
+  roll: RollCheck,
+  statInfluenceMultiplier: number,
+) {
+  const statValue = character.stats[roll.stat] ?? 10;
+  const statMod = Math.round(modifierFor(statValue) * statInfluenceMultiplier);
+  const bonus = skillBonus(character, roll);
+  return roll.difficulty - (statMod + bonus);
 }
 
 function diceSides(dice: string) {
@@ -1804,6 +1700,7 @@ function RollModal({
   pending,
   animationValue,
   activeCharacter,
+  statInfluenceMultiplier,
   onConfirm,
   onReroll,
   onClose,
@@ -1811,13 +1708,15 @@ function RollModal({
   pending: PendingRoll;
   animationValue: number;
   activeCharacter: GameCharacter;
+  statInfluenceMultiplier: number;
   onConfirm: () => void;
   onReroll: () => void;
   onClose: () => void;
 }) {
   const roll = pending.choice.roll!;
   const statValue = activeCharacter.stats[roll.stat] ?? 10;
-  const statMod = modifierFor(statValue);
+  const baseStatMod = modifierFor(statValue);
+  const statMod = Math.round(baseStatMod * statInfluenceMultiplier);
   const bonus = skillBonus(activeCharacter, roll);
   const availableRerolls =
     (activeCharacter.resources?.reroll_points ?? 0) -
@@ -1899,6 +1798,8 @@ export function RpgPage() {
   const [messages, setMessages] = useState<GameMessage[]>([]);
   const [activeCharacterId, setActiveCharacterId] = useState('');
   const [input, setInput] = useState('');
+  const [manualDice, setManualDice] = useState('d20');
+  const [statInfluencePercent, setStatInfluencePercent] = useState(100);
   const [guideInput, setGuideInput] = useState('');
   const [guideMessages, setGuideMessages] = useState<GuideChatMessage[]>([]);
   const [guideSending, setGuideSending] = useState(false);
@@ -1909,6 +1810,16 @@ export function RpgPage() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionBusyText, setSessionBusyText] = useState<string | null>(null);
+  const [sessionQueueNotice, setSessionQueueNotice] = useState<string | null>(null);
+  const [sessionRealtimeOffline, setSessionRealtimeOffline] = useState(false);
+  const [refreshingChat, setRefreshingChat] = useState(false);
+  const [trimmingChat, setTrimmingChat] = useState(false);
+  const [selectingMessages, setSelectingMessages] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
+  const [dragSelecting, setDragSelecting] = useState(false);
+  const [dragSelectValue, setDragSelectValue] = useState<boolean | null>(null);
   const [modalMode, setModalMode] = useState<'view' | 'edit' | null>(null);
   const [characterDraft, setCharacterDraft] = useState<CharacterDraft | null>(null);
   const [pendingRoll, setPendingRoll] = useState<PendingRoll | null>(null);
@@ -1939,38 +1850,45 @@ export function RpgPage() {
   const isSessionOwner =
     !session ||
     String(session.game_state.public_state.owner_player_id ?? '') === playerId;
-  const locationNameById = useMemo(() => {
-    const locations = session?.map?.locations ?? [];
-    return new Map(locations.map((location) => [location.id, location.name]));
-  }, [session?.map?.locations]);
-  const charactersByLocation = useMemo(() => {
-    const groups = new Map<string, GameCharacter[]>();
-    for (const character of session?.characters ?? []) {
-      if (!character.location_id) {
-        continue;
-      }
-      const list = groups.get(character.location_id) ?? [];
-      list.push(character);
-      groups.set(character.location_id, list);
-    }
-    return groups;
-  }, [session?.characters]);
-  const participants = session?.game_state.public_state.participants ?? [];
-  const sidebarOpenLocations = useMemo(
-    () =>
-      getOpenMapLocations(
-        session?.map,
-        activeCharacter,
-        session?.session.current_scene,
+  const participants = useMemo(
+    () => session?.game_state.public_state.participants ?? [],
+    [session?.game_state.public_state.participants],
+  );
+  const lobbyInvitations = session?.game_state.public_state.lobby_invitations ?? [];
+  const currentLobbyInvitation = lobbyInvitations.find(
+    (invite) => invite.to_player_id === playerId && invite.status === 'pending',
+  );
+  const pendingLobbyInvitations = lobbyInvitations.filter(
+    (invite) => invite.status === 'pending',
+  );
+  const canUseCurrentSession =
+    isSessionOwner ||
+    participants.some((participant) => String(participant.id) === playerId);
+  const assignablePlayers = useMemo(
+    () => [
+      ...participants.filter((participant) =>
+        session?.game_state.public_state.participant_player_ids?.includes(
+          String(participant.id),
+        ),
       ),
-    [activeCharacter, session?.map, session?.session.current_scene],
+    ],
+    [participants, session?.game_state.public_state.participant_player_ids],
   );
-  const hiddenLocationsCount = Math.max(
-    0,
-    (session?.map?.locations.filter(
-      (location) => location.visible_to_players !== false,
-    ).length ?? 0) - sidebarOpenLocations.length,
-  );
+  const participantNameById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const participant of participants) {
+      names.set(
+        String(participant.id),
+        participant.name || participant.username || 'Игрок',
+      );
+    }
+    const ownerId = String(session?.game_state.public_state.owner_player_id ?? '');
+    if (ownerId && !names.has(ownerId)) {
+      names.set(ownerId, 'Ведущий');
+    }
+    return names;
+  }, [participants, session?.game_state.public_state.owner_player_id]);
+  const statInfluenceMultiplier = statInfluencePercent / 100;
 
   useEffect(() => {
     void rpgService
@@ -2026,7 +1944,14 @@ export function RpgPage() {
           return current;
         }
 
-        return nextSession.characters[0]?.id ?? '';
+        return (
+          nextSession.characters.find(
+            (character) =>
+              String(character.player_id) === playerId && character.is_active,
+          )?.id ??
+          nextSession.characters[0]?.id ??
+          ''
+        );
       });
     },
     [playerId, selectedGameId, sessionId, user],
@@ -2042,25 +1967,90 @@ export function RpgPage() {
   }, [refreshSession, sessionId, user]);
 
   useEffect(() => {
+    if (!session || !playerId) {
+      return;
+    }
+
+    setActiveCharacterId((current) => {
+      const currentCharacter = session.characters.find(
+        (character) => character.id === current,
+      );
+
+      if (
+        currentCharacter &&
+        String(currentCharacter.player_id) === playerId &&
+        currentCharacter.is_active
+      ) {
+        return current;
+      }
+
+      return (
+        session.characters.find(
+          (character) =>
+            String(character.player_id) === playerId && character.is_active,
+        )?.id ??
+        currentCharacter?.id ??
+        session.characters[0]?.id ??
+        ''
+      );
+    });
+  }, [playerId, session]);
+
+  useEffect(() => {
     if (!sessionId) {
       return undefined;
     }
 
     const socket: Socket = io(localApiBase, {
+      auth: { token: getAuthToken() ?? '' },
       transports: ['websocket', 'polling'],
     });
-    socket.emit('join-game-session', sessionId);
+    const joinSessionRoom = () => {
+      socket.emit('join-game-session', sessionId);
+      setSessionRealtimeOffline(false);
+    };
+
+    socket.on('connect', () => {
+      joinSessionRoom();
+    });
+    socket.on('reconnect', () => {
+      joinSessionRoom();
+    });
+    socket.on('disconnect', () => {
+      setSessionRealtimeOffline(true);
+    });
+    socket.on('connect_error', () => {
+      setSessionRealtimeOffline(true);
+    });
+
+    joinSessionRoom();
     socket.on('game-message-created', () => {
       void refreshSession(sessionId);
     });
-    socket.on('game-session-updated', (nextSession: GameSessionResponse) => {
-      setSession(nextSession);
+    socket.on('game-session-updated', () => {
+      void refreshSession(sessionId);
     });
-    socket.on('game-map-updated', (nextMap: GameMapState) => {
-      setSession((current) => (current ? { ...current, map: nextMap } : current));
+    socket.on('game-map-updated', () => {
+      void refreshSession(sessionId);
     });
-    socket.on('game-turn-updated', (nextSession: GameSessionResponse) => {
-      setSession(nextSession);
+    socket.on('game-turn-updated', () => {
+      void refreshSession(sessionId);
+    });
+    socket.on(
+      'game-session-busy',
+      (payload: { busy?: boolean; label?: string } | null) => {
+        const busy = Boolean(payload?.busy);
+        setSessionBusy(busy);
+        setSessionBusyText(busy ? sessionBusyStatus(payload?.label) : null);
+        if (!busy) {
+          setSessionQueueNotice(null);
+        }
+      },
+    );
+    socket.on('game-session-queued', () => {
+      setSessionQueueNotice(
+        'В этом лобби уже обрабатывается действие. Следующий запрос выполнится сразу после ответа ведущего.',
+      );
     });
 
     return () => {
@@ -2068,6 +2058,25 @@ export function RpgPage() {
       socket.disconnect();
     };
   }, [refreshSession, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !user) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      void refreshSession(sessionId).catch(() => {
+        // Soft sync keeps both directions in sync even if a realtime event was missed.
+      });
+    }, sessionRealtimeOffline ? 1500 : 2200);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshSession, sessionId, sessionRealtimeOffline, user]);
 
   useEffect(() => {
     return () => {
@@ -2178,7 +2187,8 @@ export function RpgPage() {
     (choice: Choice, diceValue: number, rerolled: boolean, rerollsSpent: number) => {
       const roll = choice.roll!;
       const statValue = activeCharacter?.stats[roll.stat] ?? 10;
-      const statMod = modifierFor(statValue);
+      const baseStatMod = modifierFor(statValue);
+      const statMod = Math.round(baseStatMod * statInfluenceMultiplier);
       const bonus = activeCharacter ? skillBonus(activeCharacter, roll) : 0;
       const total = diceValue + statMod + bonus;
 
@@ -2196,7 +2206,7 @@ export function RpgPage() {
         rerolls_spent: rerollsSpent,
       };
     },
-    [activeCharacter],
+    [activeCharacter, statInfluenceMultiplier],
   );
 
   const startRoll = useCallback(
@@ -2249,11 +2259,17 @@ export function RpgPage() {
       return;
     }
 
+    if (!activeCharacter.is_active || activeCharacter.derived.hp_current <= 0) {
+      setError('Этот персонаж выбыл из истории и больше не может действовать.');
+      return;
+    }
+
     if (!content.trim()) {
       return;
     }
 
     const trimmedContent = content.trim().slice(0, 1200);
+    const showOptimisticMessage = !sessionBusy;
     const localMessage = createLocalPlayerMessage({
       sessionId,
       playerId,
@@ -2261,7 +2277,9 @@ export function RpgPage() {
       content: trimmedContent,
     });
 
-    setMessages((current) => [...current, localMessage]);
+    if (showOptimisticMessage) {
+      setMessages((current) => [...current, localMessage]);
+    }
     setSending(true);
     setError(null);
     setNotice(null);
@@ -2277,7 +2295,9 @@ export function RpgPage() {
       });
       setMessages((current) =>
         appendUniqueMessages(
-          current.filter((message) => message.id !== localMessage.id),
+          showOptimisticMessage
+            ? current.filter((message) => message.id !== localMessage.id)
+            : current,
           [response.player_message, response.gm_message],
         ),
       );
@@ -2295,7 +2315,7 @@ export function RpgPage() {
   };
 
   const handleGenerate = async () => {
-    if (readOnlyMode) {
+    if (readOnlyMode || sessionBusy) {
       return;
     }
 
@@ -2346,7 +2366,7 @@ export function RpgPage() {
   };
 
   const handleGenerateCharacter = async () => {
-    if (readOnlyMode || !sessionId) {
+    if (readOnlyMode || !sessionId || sessionBusy || loading) {
       return;
     }
 
@@ -2377,8 +2397,12 @@ export function RpgPage() {
     try {
       const response = await rpgService.claimCharacter(sessionId, characterId);
       setSession(response.session);
-      setActiveCharacterId(response.character.id);
-      setNotice('Персонаж выбран.');
+      if (String(response.character.player_id ?? '') === playerId) {
+        setActiveCharacterId(response.character.id);
+        setNotice('Персонаж выбран.');
+      } else {
+        setNotice('Вы отказались от персонажа.');
+      }
     } catch (requestError) {
       browserLogger.error('rpg-page', 'character claim failed', requestError);
       setError(safeGameError(requestError));
@@ -2396,7 +2420,7 @@ export function RpgPage() {
   };
 
   const handleInviteFriend = async (friendId = friendToInvite) => {
-    if (readOnlyMode || !sessionId || !friendId) {
+    if (readOnlyMode || !sessionId || !friendId || !canUseCurrentSession) {
       return;
     }
 
@@ -2408,7 +2432,7 @@ export function RpgPage() {
       const response = await rpgService.invitePlayer(sessionId, friendId);
       setSession(response.session);
       setFriendToInvite('');
-      setNotice('Игрок приглашён в партию.');
+      setNotice('Приглашение отправлено. Игрок появится в партии после принятия.');
     } catch (requestError) {
       browserLogger.error('rpg-page', 'friend invite failed', requestError);
       setError(safeGameError(requestError));
@@ -2417,8 +2441,62 @@ export function RpgPage() {
     }
   };
 
+  const handleRespondLobbyInvitation = async (status: 'accepted' | 'declined') => {
+    if (!sessionId || !currentLobbyInvitation) {
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const response = await rpgService.respondLobbyInvitation(
+        sessionId,
+        currentLobbyInvitation.id,
+        status,
+      );
+      setSession(response.session);
+      setNotice(
+        status === 'accepted'
+          ? 'Вы приняли приглашение. Ведущий назначит вам персонажа или разрешит создать своего.'
+          : 'Вы отклонили приглашение.',
+      );
+    } catch (requestError) {
+      browserLogger.error('rpg-page', 'lobby invitation respond failed', requestError);
+      setError(safeGameError(requestError));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAssignCharacter = async (characterId: string, assigneeId: string) => {
+    if (readOnlyMode || !sessionId || !isSessionOwner) {
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const response = await rpgService.assignCharacter(
+        sessionId,
+        characterId,
+        assigneeId,
+      );
+      setSession(response.session);
+      setNotice('Персонаж назначен игроку.');
+    } catch (requestError) {
+      browserLogger.error('rpg-page', 'character assign failed', requestError);
+      setError(safeGameError(requestError));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleReviseScenario = async () => {
-    if (readOnlyMode || !sessionId || !scenarioWish.trim()) {
+    if (readOnlyMode || !sessionId || !scenarioWish.trim() || sessionBusy) {
       return;
     }
 
@@ -2446,7 +2524,7 @@ export function RpgPage() {
   const handleReviseCharacter = async (characterId: string) => {
     const wish = characterWishes[characterId]?.trim() ?? '';
 
-    if (readOnlyMode || !sessionId || !wish) {
+    if (readOnlyMode || !sessionId || !wish || sessionBusy) {
       return;
     }
 
@@ -2632,6 +2710,148 @@ export function RpgPage() {
     void sendAction(input);
   };
 
+  const handleManualDice = (expression: string) => {
+    if (readOnlyMode || !activeCharacter || sending) {
+      return;
+    }
+
+    void sendAction(`/roll ${expression}`);
+  };
+
+  const handleManualDiceSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    const expression = manualDice.trim() || 'd20';
+    handleManualDice(expression);
+  };
+
+  const handleRefreshChat = async () => {
+    if (!sessionId || refreshingChat) {
+      return;
+    }
+
+    setRefreshingChat(true);
+    setError(null);
+
+    try {
+      await refreshSession(sessionId);
+      setNotice('Чат синхронизирован с сервером.');
+    } catch (requestError) {
+      browserLogger.error('rpg-page', 'chat refresh failed', requestError);
+      setError(safeGameError(requestError));
+    } finally {
+      setRefreshingChat(false);
+    }
+  };
+
+  const handleTrimRecentMessages = async () => {
+    if (!sessionId || trimmingChat) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Удалить последние 6 сообщений чата? Сценарий, персонажи и прогресс игры сохранятся.',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setTrimmingChat(true);
+    setError(null);
+
+    try {
+      await rpgService.trimRecentMessages(sessionId, 6);
+      await refreshSession(sessionId);
+      setNotice('Последние сообщения удалены, прогресс игры сохранён.');
+    } catch (requestError) {
+      browserLogger.error('rpg-page', 'chat trim failed', requestError);
+      setError(safeGameError(requestError));
+    } finally {
+      setTrimmingChat(false);
+    }
+  };
+
+  const toggleMessageSelection = (messageId: string) => {
+    setSelectedMessageIds((current) =>
+      current.includes(messageId)
+        ? current.filter((id) => id !== messageId)
+        : [...current, messageId],
+    );
+  };
+
+  const applyMessageSelection = (messageId: string, nextSelected: boolean) => {
+    setSelectedMessageIds((current) => {
+      const exists = current.includes(messageId);
+      if (nextSelected && !exists) {
+        return [...current, messageId];
+      }
+      if (!nextSelected && exists) {
+        return current.filter((id) => id !== messageId);
+      }
+      return current;
+    });
+  };
+
+  const handleSelectDragStart = (messageId: string) => {
+    const nextSelected = !selectedMessageIds.includes(messageId);
+    setDragSelecting(true);
+    setDragSelectValue(nextSelected);
+    applyMessageSelection(messageId, nextSelected);
+  };
+
+  const handleSelectDragEnter = (messageId: string) => {
+    if (!dragSelecting || dragSelectValue === null) {
+      return;
+    }
+    applyMessageSelection(messageId, dragSelectValue);
+  };
+
+  useEffect(() => {
+    if (!dragSelecting) {
+      return undefined;
+    }
+
+    const stopDragging = () => {
+      setDragSelecting(false);
+      setDragSelectValue(null);
+    };
+
+    window.addEventListener('mouseup', stopDragging);
+    window.addEventListener('blur', stopDragging);
+    return () => {
+      window.removeEventListener('mouseup', stopDragging);
+      window.removeEventListener('blur', stopDragging);
+    };
+  }, [dragSelecting]);
+
+  const handleDeleteSelectedMessages = async () => {
+    if (!sessionId || trimmingChat || !selectedMessageIds.length) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Удалить выбранные сообщения (${selectedMessageIds.length})? Прогресс игры сохранится.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setTrimmingChat(true);
+    setError(null);
+
+    try {
+      await rpgService.deleteMessagesByIds(sessionId, selectedMessageIds);
+      await refreshSession(sessionId);
+      setSelectingMessages(false);
+      setSelectedMessageIds([]);
+      setNotice('Выбранные сообщения удалены, прогресс игры сохранён.');
+    } catch (requestError) {
+      browserLogger.error('rpg-page', 'chat selected-delete failed', requestError);
+      setError(safeGameError(requestError));
+    } finally {
+      setTrimmingChat(false);
+    }
+  };
+
   const handleGuideQuestion = async (event: FormEvent) => {
     event.preventDefault();
 
@@ -2683,42 +2903,6 @@ export function RpgPage() {
     }
   };
 
-  const handleMoveToken = useCallback(
-    async ({ x, y }: { x: number; y: number }) => {
-      if (readOnlyMode || !sessionId || !activeCharacter) {
-        return;
-      }
-
-      try {
-        const nextMap = await rpgService.moveToken(sessionId, activeCharacter.id, {
-          player_id: playerId,
-          x,
-          y,
-        });
-        setSession((current) => (current ? { ...current, map: nextMap } : current));
-      } catch (requestError) {
-        browserLogger.error('rpg-page', 'move failed', requestError);
-        setError(safeGameError(requestError));
-      }
-    },
-    [activeCharacter, playerId, readOnlyMode, sessionId],
-  );
-
-  const moveDisabledReason = useMemo(() => {
-    if (!activeCharacter) {
-      return 'сначала выберите персонажа';
-    }
-
-    if (
-      session?.session.turn_mode &&
-      session.session.current_actor_id !== activeCharacter.id
-    ) {
-      return 'движение доступно только в свой ход';
-    }
-
-    return undefined;
-  }, [activeCharacter, session?.session.current_actor_id, session?.session.turn_mode]);
-
   if (authLoading) {
     return (
       <div className={styles.page}>
@@ -2762,6 +2946,34 @@ export function RpgPage() {
 
       {error ? <p className={styles.error}>{error}</p> : null}
       {notice ? <p className={styles.notice}>{notice}</p> : null}
+      {sessionQueueNotice ? <p className={styles.notice}>{sessionQueueNotice}</p> : null}
+      {sessionBusyText ? <p className={styles.generationStatus}>{sessionBusyText}</p> : null}
+      {currentLobbyInvitation ? (
+        <Panel
+          title="Приглашение в лобби"
+          description={`Ведущий ${
+            currentLobbyInvitation.from_name || 'партии'
+          } приглашает вас в эту ролевую партию.`}
+        >
+          <div className={styles.invitationActions}>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={loading}
+              onClick={() => void handleRespondLobbyInvitation('declined')}
+            >
+              Отклонить
+            </Button>
+            <Button
+              type="button"
+              disabled={loading}
+              onClick={() => void handleRespondLobbyInvitation('accepted')}
+            >
+              Принять
+            </Button>
+          </div>
+        </Panel>
+      ) : null}
 
       {!isPlaying && !isFinished ? (
         <>
@@ -2797,13 +3009,23 @@ export function RpgPage() {
                     onChange={(event) => setPartyPlayers(event.target.value)}
                   />
                 </Field>
+                {loading ? (
+                  <p className={styles.generationStatus}>
+                    Ведущий готовит сцену. Это может занять немного времени.
+                  </p>
+                ) : null}
+                <div className={styles.startBar}>
+                  <Button type="button" disabled={loading || sessionBusy} onClick={handleGenerate}>
+                    {loading ? 'Ведущий готовит сцену...' : 'Сгенерировать сценарий'}
+                  </Button>
+                </div>
                 <div className={styles.inviteRow}>
                   <div>
                     <strong>Друзья в партии</strong>
                     <p className={styles.muted}>
                       {selectedInitialFriendIds.length
-                        ? `Выбрано: ${selectedInitialFriendIds.length}`
-                        : 'Можно пригласить друзей сейчас или добавить их позже.'}
+                        ? `Будет отправлено приглашений: ${selectedInitialFriendIds.length}`
+                        : 'После генерации друзья получат приглашение и сами решат, принять его или нет.'}
                     </p>
                   </div>
                   <Button
@@ -2812,16 +3034,6 @@ export function RpgPage() {
                     onClick={() => setInviteFriendsOpen(true)}
                   >
                     Пригласить друзей
-                  </Button>
-                </div>
-                {loading ? (
-                  <p className={styles.generationStatus}>
-                    Ведущий готовит сцену. Это может занять немного времени.
-                  </p>
-                ) : null}
-                <div className={styles.startBar}>
-                  <Button type="button" disabled={loading} onClick={handleGenerate}>
-                    {loading ? 'Ведущий готовит сцену...' : 'Сгенерировать сценарий'}
                   </Button>
                 </div>
               </div>
@@ -2871,7 +3083,9 @@ export function RpgPage() {
                           type="button"
                           variant="secondary"
                           disabled={
-                            revisionTarget === 'scenario' || !scenarioWish.trim()
+                            revisionTarget === 'scenario' ||
+                            !scenarioWish.trim() ||
+                            sessionBusy
                           }
                           onClick={handleReviseScenario}
                         >
@@ -2885,11 +3099,35 @@ export function RpgPage() {
                 </>
               ) : null}
               {participants.length ? (
-                <div className={styles.partyPlayers}>
-                  {participants.map((participant) => (
-                    <span key={participant.id}>
-                      {participant.name || participant.username || 'Игрок'}
-                      {participant.role ? ` · ${participant.role}` : ''}
+                <div className={styles.inviteRow}>
+                  <div>
+                    <strong>Игроки партии</strong>
+                    <div className={styles.partyPlayers}>
+                      {participants.map((participant) => (
+                        <span key={participant.id}>
+                          {participant.name || participant.username || 'Игрок'}
+                          {participant.role ? ` · ${participant.role}` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  {session && !readOnlyMode && canUseCurrentSession ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={loading}
+                      onClick={() => setInviteFriendsOpen(true)}
+                    >
+                      Пригласить друзей
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+              {pendingLobbyInvitations.length && isSessionOwner ? (
+                <div className={styles.pendingInvites}>
+                  {pendingLobbyInvitations.map((invite) => (
+                    <span key={invite.id}>
+                      Ожидает: {invite.to_name || invite.to_username || 'игрок'}
                     </span>
                   ))}
                 </div>
@@ -2900,16 +3138,8 @@ export function RpgPage() {
               id="rpg-character-options"
               title="Персонажи"
               action={
-                session && !readOnlyMode && isSessionOwner ? (
+                session && !readOnlyMode && canUseCurrentSession ? (
                   <div className={styles.actions}>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      disabled={loading}
-                      onClick={() => setInviteFriendsOpen(true)}
-                    >
-                      Пригласить друзей
-                    </Button>
                     <Button
                       type="button"
                       variant="secondary"
@@ -2924,7 +3154,7 @@ export function RpgPage() {
                     <Button
                       type="button"
                       variant="secondary"
-                      disabled={loading}
+                      disabled={loading || sessionBusy}
                       onClick={handleGenerateCharacter}
                     >
                       Сгенерировать персонажа
@@ -2963,12 +3193,19 @@ export function RpgPage() {
                           Здоровье {character.derived.hp_current}/
                           {character.derived.hp_max}
                         </small>
-                        {character.location_id ? (
-                          <small>
-                            Место: {locationNameById.get(character.location_id) ?? 'неизвестно'}
-                          </small>
+                        <small>
+                          Игрок:{' '}
+                          {String(character.player_id ?? '') === 'party'
+                            ? 'Не назначен'
+                            : participantNameById.get(String(character.player_id ?? '')) ??
+                              `#${String(character.player_id ?? 'неизвестно')}`}
+                        </small>
+                        {!character.is_active || character.derived.hp_current <= 0 ? (
+                          <small className={styles.deadBadge}>Погиб</small>
                         ) : null}
-                        {!readOnlyMode && character.player_id !== playerId ? (
+                        {!readOnlyMode &&
+                        canUseCurrentSession &&
+                        character.is_active ? (
                           <i
                             role="button"
                             tabIndex={0}
@@ -2983,7 +3220,9 @@ export function RpgPage() {
                               }
                             }}
                           >
-                            Выбрать персонажа
+                            {String(character.player_id ?? '') === playerId
+                              ? 'Отказаться от персонажа'
+                              : 'Выбрать персонажа'}
                           </i>
                         ) : null}
                         {!readOnlyMode && isSessionOwner ? (
@@ -3006,6 +3245,28 @@ export function RpgPage() {
                         ) : null}
                       </button>
                       {!readOnlyMode && isSessionOwner ? (
+                        <label className={styles.assignControl}>
+                          <span>Игрок</span>
+                          <select
+                            value={character.player_id || 'party'}
+                            disabled={loading || sessionBusy}
+                            onChange={(event) =>
+                              void handleAssignCharacter(
+                                character.id,
+                                event.target.value,
+                              )
+                            }
+                          >
+                            <option value="party">Не назначен</option>
+                            {assignablePlayers.map((participant) => (
+                              <option key={participant.id} value={participant.id}>
+                                {participant.name || participant.username || 'Игрок'}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                      {!readOnlyMode && isSessionOwner ? (
                         <div className={styles.characterRevision}>
                           <textarea
                             value={characterWishes[character.id] ?? ''}
@@ -3023,7 +3284,8 @@ export function RpgPage() {
                             variant="secondary"
                             disabled={
                               revisionTarget === character.id ||
-                              !(characterWishes[character.id] ?? '').trim()
+                              !(characterWishes[character.id] ?? '').trim() ||
+                              sessionBusy
                             }
                             onClick={() => void handleReviseCharacter(character.id)}
                           >
@@ -3050,7 +3312,9 @@ export function RpgPage() {
             <div className={styles.startBar}>
               <Button
                 type="button"
-                disabled={loading || !session.characters.length || !isSessionOwner}
+                disabled={
+                  loading || sessionBusy || !session.characters.length || !isSessionOwner
+                }
                 onClick={handleStartGame}
               >
                 Начать игру
@@ -3082,6 +3346,80 @@ export function RpgPage() {
               </div>
             </Panel>
           </div>
+
+          <aside className={styles.sidebar}>
+            <Panel title="Сводка истории">
+              <div className={styles.sideList}>
+                <div className={styles.questCard}>
+                  <strong>{session.game_state.public_state.scenario?.title ?? 'Сценарий'}</strong>
+                  <span>{session.session.genre}</span>
+                  <p>{session.game_state.public_state.scenario?.short_description ?? 'Описание недоступно.'}</p>
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Персонажи">
+              <div className={styles.sideList}>
+                {session.characters.length ? (
+                  session.characters.map((character) => (
+                    <div key={character.id} className={styles.partyCard}>
+                      <strong>{character.name}</strong>
+                      <span>
+                        {character.derived.hp_current}/{character.derived.hp_max}
+                      </span>
+                      {!character.is_active || character.derived.hp_current <= 0 ? (
+                        <span className={styles.deadBadge}>Погиб</span>
+                      ) : null}
+                      <small>{character.role} · {character.class_name}</small>
+                      <small>
+                        Игрок:{' '}
+                        {String(character.player_id ?? '') === 'party'
+                          ? 'Не назначен'
+                          : participantNameById.get(String(character.player_id ?? '')) ??
+                            `#${String(character.player_id ?? 'неизвестно')}`}
+                      </small>
+                    </div>
+                  ))
+                ) : (
+                  <p className={styles.muted}>В этой истории нет персонажей.</p>
+                )}
+              </div>
+            </Panel>
+
+            <Panel title="Задания">
+              {session.quests.length ? (
+                <div className={styles.sideList}>
+                  {session.quests.map((quest) => (
+                    <div key={quest.id} className={styles.questCard}>
+                      <strong>{quest.title}</strong>
+                      <span>{quest.status}</span>
+                      <p>{quest.description}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className={styles.muted}>Активных заданий не осталось.</p>
+              )}
+            </Panel>
+
+            <Panel title="Локации">
+              {session.map?.locations?.length ? (
+                <div className={styles.sideList}>
+                  {session.map.locations
+                    .filter((location) => location.visible_to_players !== false)
+                    .map((location) => (
+                      <div key={location.id} className={styles.questCard}>
+                        <strong>{location.name}</strong>
+                        <span>Опасность: {location.danger_level ?? 1}</span>
+                        <p>{location.description || 'Описание отсутствует.'}</p>
+                      </div>
+                    ))}
+                </div>
+              ) : (
+                <p className={styles.muted}>Локации не сохранены.</p>
+              )}
+            </Panel>
+          </aside>
         </section>
       ) : null}
 
@@ -3098,14 +3436,58 @@ export function RpgPage() {
               }
               action={
                 readOnlyMode ? null : (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={loading}
-                    onClick={handleFinishGame}
-                  >
-                    Завершить игру
-                  </Button>
+                  <div className={styles.actions}>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={refreshingChat}
+                      onClick={() => void handleRefreshChat()}
+                    >
+                      {refreshingChat ? 'Синхронизация...' : 'Обновить чат'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={trimmingChat}
+                      onClick={() => {
+                        setSelectingMessages((current) => {
+                          const next = !current;
+                          if (!next) {
+                            setSelectedMessageIds([]);
+                          }
+                          return next;
+                        });
+                      }}
+                    >
+                      {selectingMessages ? 'Отменить выбор' : 'Выбрать сообщения'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={trimmingChat || !selectedMessageIds.length}
+                      onClick={() => void handleDeleteSelectedMessages()}
+                    >
+                      {trimmingChat
+                        ? 'Удаление...'
+                        : `Удалить выбранные (${selectedMessageIds.length})`}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={trimmingChat}
+                      onClick={() => void handleTrimRecentMessages()}
+                    >
+                      {trimmingChat ? 'Очистка...' : 'Очистить последние сообщения'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={loading}
+                      onClick={handleFinishGame}
+                    >
+                      Завершить игру
+                    </Button>
+                  </div>
                 )
               }
             >
@@ -3138,8 +3520,12 @@ export function RpgPage() {
               </div>
 
               <div className={styles.chatBox}>
-                {sending ? (
-                  <div className={styles.chatStatus}>Ожидается ответ ведущего</div>
+                {sending || sessionBusy ? (
+                  <div className={styles.chatStatus}>
+                    {sending
+                      ? 'Ожидается ответ ведущего'
+                      : 'Ведущий обрабатывает действие'}
+                  </div>
                 ) : null}
                 <div ref={chatWindowRef} className={styles.chatWindow}>
                   {messages.map((message) => (
@@ -3151,6 +3537,11 @@ export function RpgPage() {
                       )}
                       content={typedMessages[message.id]}
                       typing={typingMessageId === message.id}
+                      selectable={selectingMessages}
+                      selected={selectedMessageIds.includes(message.id)}
+                      onToggleSelect={toggleMessageSelection}
+                      onSelectDragStart={handleSelectDragStart}
+                      onSelectDragEnter={handleSelectDragEnter}
                     />
                   ))}
                 </div>
@@ -3161,7 +3552,13 @@ export function RpgPage() {
                   <button
                     key={choice.id}
                     type="button"
-                    disabled={readOnlyMode || sending || !activeCharacter}
+                    disabled={
+                      readOnlyMode ||
+                      !canUseCurrentSession ||
+                      sending ||
+                      !activeCharacter ||
+                      !activeCharacter.is_active
+                    }
                     onClick={() => handleChoiceClick(choice)}
                   >
                     <strong>{choice.label}</strong>
@@ -3169,6 +3566,23 @@ export function RpgPage() {
                       <span>
                         Проверка: {statLabels[choice.roll.stat]}, сложность{' '}
                         {choice.roll.difficulty}
+                        {activeCharacter
+                          ? (() => {
+                              const needed = requiredDiceTarget(
+                                activeCharacter,
+                                choice.roll,
+                                statInfluenceMultiplier,
+                              );
+                              const sides = diceSides(choice.roll.dice);
+                              if (needed <= 1) {
+                                return ', на кубике: любой результат';
+                              }
+                              if (needed > sides) {
+                                return `, на кубике: ${needed}+`;
+                              }
+                              return `, на кубике: ${needed}+`;
+                            })()
+                          : ''}
                       </span>
                     ) : null}
                   </button>
@@ -3184,20 +3598,33 @@ export function RpgPage() {
                       ? 'История открыта только для просмотра'
                       : 'Опишите действие персонажа внутри сцены'
                   }
-                  disabled={readOnlyMode || !activeCharacter || sending}
+                  disabled={
+                    readOnlyMode ||
+                    !canUseCurrentSession ||
+                    !activeCharacter ||
+                    !activeCharacter.is_active ||
+                    sending
+                  }
                   onChange={(event) => setInput(event.target.value)}
                 />
                 <div className={styles.chatFooter}>
                   <span>{input.length}/1200</span>
                   <Button
                     type="submit"
-                    disabled={readOnlyMode || !activeCharacter || sending}
+                    disabled={
+                      readOnlyMode ||
+                      !canUseCurrentSession ||
+                      !activeCharacter ||
+                      !activeCharacter.is_active ||
+                      sending
+                    }
                   >
                     {sending ? 'Ведущий думает...' : 'Отправить'}
                   </Button>
                 </div>
               </form>
             </Panel>
+
           </div>
 
           <aside className={styles.sidebar}>
@@ -3209,7 +3636,7 @@ export function RpgPage() {
                   <Button
                     type="button"
                     variant="secondary"
-                    disabled={loading}
+                    disabled={loading || sessionBusy}
                     onClick={() => {
                       setCharacterDraft(blankCharacterDraft());
                       setModalMode('edit');
@@ -3220,7 +3647,7 @@ export function RpgPage() {
                   <Button
                     type="button"
                     variant="secondary"
-                    disabled={loading}
+                    disabled={loading || sessionBusy}
                     onClick={handleGenerateCharacter}
                   >
                     Сгенерировать
@@ -3245,14 +3672,20 @@ export function RpgPage() {
                     <span>
                       {character.derived.hp_current}/{character.derived.hp_max}
                     </span>
+                    {!character.is_active || character.derived.hp_current <= 0 ? (
+                      <span className={styles.deadBadge}>Погиб</span>
+                    ) : null}
                     <small>{character.role} · {character.class_name}</small>
                     <small>
-                      Место:{' '}
-                      {character.location_id
-                        ? locationNameById.get(character.location_id) ?? 'неизвестно'
-                        : 'не указано'}
+                      Игрок:{' '}
+                      {String(character.player_id ?? '') === 'party'
+                        ? 'Не назначен'
+                        : participantNameById.get(String(character.player_id ?? '')) ??
+                          `#${String(character.player_id ?? 'неизвестно')}`}
                     </small>
-                    {!readOnlyMode && character.player_id !== playerId ? (
+                    {!readOnlyMode &&
+                    canUseCurrentSession &&
+                    character.is_active ? (
                       <em
                         role="button"
                         tabIndex={0}
@@ -3267,42 +3700,14 @@ export function RpgPage() {
                           }
                         }}
                       >
-                        Выбрать
+                        {String(character.player_id ?? '') === playerId
+                          ? 'Отказаться'
+                          : 'Выбрать'}
                       </em>
                     ) : null}
                   </button>
                 ))}
               </div>
-            </Panel>
-
-            <Panel title="Открытые места">
-              {sidebarOpenLocations.length ? (
-                <div className={styles.openLocationList}>
-                  {sidebarOpenLocations.map((location) => (
-                    <div key={location.id} className={styles.openLocationItem}>
-                      <strong>{location.name}</strong>
-                      <span>Опасность {location.danger_level ?? 1}</span>
-                      {location.description ? <p>{location.description}</p> : null}
-                      <small>
-                        Здесь:{' '}
-                        {charactersByLocation.get(location.id)?.length
-                          ? charactersByLocation
-                              .get(location.id)!
-                              .map((character) => character.name)
-                              .join(', ')
-                          : 'никого из персонажей'}
-                      </small>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className={styles.muted}>Пока известна только текущая сцена.</p>
-              )}
-              {hiddenLocationsCount ? (
-                <p className={styles.muted}>
-                  {hiddenLocationsCount} мест ещё не открыто.
-                </p>
-              ) : null}
             </Panel>
 
             <Panel title="Задания">
@@ -3319,6 +3724,22 @@ export function RpgPage() {
               ) : (
                 <p className={styles.muted}>Активных заданий пока нет.</p>
               )}
+            </Panel>
+
+            <Panel title="Кубики">
+              <label className={styles.assignControl}>
+                <span>Влияние характеристик: {statInfluencePercent}%</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={200}
+                  step={10}
+                  value={statInfluencePercent}
+                  onChange={(event) =>
+                    setStatInfluencePercent(Number(event.target.value) || 100)
+                  }
+                />
+              </label>
             </Panel>
 
             <Panel title="Вопрос ведущему">
@@ -3429,6 +3850,9 @@ export function RpgPage() {
                   const alreadyInParty = participants.some(
                     (participant) => String(participant.id) === friendId,
                   );
+                  const pendingInvite = pendingLobbyInvitations.some(
+                    (invite) => String(invite.to_player_id) === friendId,
+                  );
 
                   return (
                     <article key={friend.id} className={styles.friendInviteItem}>
@@ -3440,10 +3864,14 @@ export function RpgPage() {
                         <Button
                           type="button"
                           variant="secondary"
-                          disabled={loading || alreadyInParty}
+                          disabled={loading || alreadyInParty || pendingInvite}
                           onClick={() => void handleInviteFriend(friendId)}
                         >
-                          {alreadyInParty ? 'Уже в партии' : 'Пригласить'}
+                          {alreadyInParty
+                            ? 'Уже в партии'
+                            : pendingInvite
+                              ? 'Ожидает'
+                              : 'Пригласить'}
                         </Button>
                       ) : (
                         <Button
@@ -3487,6 +3915,7 @@ export function RpgPage() {
           pending={pendingRoll}
           animationValue={animationValue}
           activeCharacter={activeCharacter}
+          statInfluenceMultiplier={statInfluenceMultiplier}
           onConfirm={handleConfirmRoll}
           onReroll={handleReroll}
           onClose={() => setPendingRoll(null)}

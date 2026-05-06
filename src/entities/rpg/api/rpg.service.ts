@@ -3,7 +3,6 @@ import {
   AvailableGame,
   CampaignCharacterTemplate,
   Choice,
-  GameMapState,
   GameMessage,
   GameSessionListItem,
   GameSessionResponse,
@@ -132,6 +131,30 @@ export const rpgService = {
     );
   },
 
+  respondLobbyInvitation(
+    sessionId: string,
+    invitationId: string,
+    status: 'accepted' | 'declined',
+  ) {
+    return localRequest<{ session: GameSessionResponse; status: string }>(
+      `/api/game-sessions/${sessionId}/invitations/${invitationId}/respond`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ status }),
+      },
+    );
+  },
+
+  assignCharacter(sessionId: string, characterId: string, playerId: string) {
+    return localRequest<{ character: GameCharacter; session: GameSessionResponse }>(
+      `/api/game-sessions/${sessionId}/characters/${characterId}/assign`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ player_id: playerId }),
+      },
+    );
+  },
+
   startSession(sessionId: string, playerId: string) {
     return localRequest<GameSessionResponse>(`/api/game-sessions/${sessionId}/start`, {
       method: 'POST',
@@ -177,6 +200,26 @@ export const rpgService = {
     );
   },
 
+  trimRecentMessages(sessionId: string, count = 6) {
+    return localRequest<{ removed: number; state: GameSessionResponse }>(
+      `/api/game-sessions/${sessionId}/messages/trim`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ count }),
+      },
+    );
+  },
+
+  deleteMessagesByIds(sessionId: string, messageIds: string[]) {
+    return localRequest<{ removed: number; state: GameSessionResponse }>(
+      `/api/game-sessions/${sessionId}/messages/delete`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ message_ids: messageIds }),
+      },
+    );
+  },
+
   askGuide(sessionId: string, question: string) {
     return localRequest<{ answer: string }>(
       `/api/game-sessions/${sessionId}/guide-chat`,
@@ -193,26 +236,5 @@ export const rpgService = {
     });
   },
 
-  getMap(sessionId: string, playerId?: string) {
-    const query = playerId ? `?player_id=${encodeURIComponent(playerId)}` : '';
-    return localRequest<GameMapState>(`/api/game-sessions/${sessionId}/map${query}`);
-  },
-
-  moveToken(
-    sessionId: string,
-    tokenId: string,
-    payload: {
-      player_id: string;
-      x: number;
-      y: number;
-    },
-  ) {
-    return localRequest<GameMapState>(
-      `/api/game-sessions/${sessionId}/map/tokens/${tokenId}`,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      },
-    );
-  },
+  // Map interactions removed from active RPG UI.
 };

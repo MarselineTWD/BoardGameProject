@@ -441,14 +441,14 @@ function normalizeCharacterPayload(character, fallbackId = null) {
     movement: normalized.derived?.movement ?? 6,
   };
 
-  return {
+  return withCharacterFate({
     ...normalized,
     derived,
     resources: {
       reroll_points: normalized.resources?.reroll_points ?? 2,
       ...(normalized.resources ?? {}),
     },
-  };
+  });
 }
 
 function characterStatsStorage(character) {
@@ -460,6 +460,43 @@ function characterStatsStorage(character) {
     resources: character.resources,
     skills: character.skills,
     is_player_character: character.is_player_character,
+  };
+}
+
+function withCharacterFate(character) {
+  const hpCurrent = Number(
+    character.derived?.hp_current ?? character.hp_current ?? character.hp_max ?? 10,
+  );
+  const existingStatuses = Array.isArray(character.status_effects)
+    ? character.status_effects
+    : [];
+  const alreadyMarked = existingStatuses.some((status) => {
+    const text =
+      typeof status === 'string'
+        ? status
+        : `${status?.id ?? ''} ${status?.name ?? ''}`;
+    return /dead|погиб|выбыл|смерт/i.test(text);
+  });
+
+  if (hpCurrent > 0 || alreadyMarked) {
+    return {
+      ...character,
+      is_active: character.is_active ?? hpCurrent > 0,
+    };
+  }
+
+  return {
+    ...character,
+    is_active: false,
+    status_effects: [
+      ...existingStatuses,
+      {
+        id: 'dead',
+        name: 'Погиб',
+        description:
+          'Персонаж окончательно выбыл из истории. Описание остаётся без графичных подробностей.',
+      },
+    ],
   };
 }
 
@@ -843,6 +880,7 @@ async function insertLobbyScenario(
   generatedScenario,
   ownerPlayerId = null,
   participants = [],
+  initialInvitations = [],
 ) {
   const sessionId = randomUUID();
   const stateId = randomUUID();
@@ -873,6 +911,10 @@ async function insertLobbyScenario(
       ...participants.map((participant) => participant.id),
     ]),
     participants,
+    lobby_invitations: initialInvitations.map((invitation) => ({
+      ...invitation,
+      session_id: sessionId,
+    })),
     deepseek_chat_id: sessionId,
     selected_game: game,
     theme,
@@ -957,7 +999,7 @@ async function insertLobbyScenario(
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12,
-          $13, $14, $15, $16, $17, $18, $19, true
+          $13, $14, $15, $16, $17, $18, $19, $20
         )
       `,
       [
@@ -980,6 +1022,7 @@ async function insertLobbyScenario(
         token?.location_id ?? firstLocation?.id ?? null,
         token?.x ?? (firstLocation?.x ?? 160) + index * 56,
         token?.y ?? (firstLocation?.y ?? 160) + index * 44,
+        character.is_active ?? true,
       ],
     );
   }
@@ -1062,7 +1105,7 @@ async function insertCharacterRow(poolOrClient, sessionId, playerId, character, 
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12,
-        $13, $14, $15, $16, $17, $18, $19, true
+        $13, $14, $15, $16, $17, $18, $19, $20
       )
       RETURNING *
     `,
@@ -1086,6 +1129,7 @@ async function insertCharacterRow(poolOrClient, sessionId, playerId, character, 
       token?.location_id ?? firstLocation?.id ?? null,
       x,
       y,
+      normalized.is_active ?? true,
     ],
   );
 
@@ -1501,7 +1545,7 @@ async function applyCharacterPatch(client, sessionId, characterPatch) {
   }
 
   const stored = rowCharacterStorage(row);
-  const merged = normalizeCharacterPayload({
+  const merged = withCharacterFate(normalizeCharacterPayload({
     id: row.id,
     name: characterPatch.name ?? row.name,
     role: characterPatch.role ?? row.role,
@@ -1525,7 +1569,7 @@ async function applyCharacterPatch(client, sessionId, characterPatch) {
     inventory: characterPatch.inventory ?? row.inventory_json ?? [],
     status_effects: characterPatch.status_effects ?? row.status_effects_json ?? [],
     is_player_character: stored.is_player_character,
-  });
+  }));
 
   await client.query(
     `
@@ -1547,8 +1591,9 @@ async function applyCharacterPatch(client, sessionId, characterPatch) {
         location_id = $14,
         x = $15,
         y = $16,
+        is_active = $17,
         updated_at = now()
-      WHERE id = $17 AND session_id = $18
+      WHERE id = $18 AND session_id = $19
     `,
     [
       merged.name,
@@ -1569,6 +1614,9 @@ async function applyCharacterPatch(client, sessionId, characterPatch) {
         : row.location_id,
       characterPatch.x !== undefined ? characterPatch.x : row.x,
       characterPatch.y !== undefined ? characterPatch.y : row.y,
+      characterPatch.is_active !== undefined
+        ? Boolean(characterPatch.is_active) && merged.derived.hp_current > 0
+        : merged.is_active ?? row.is_active,
       characterPatch.id,
       sessionId,
     ],
@@ -1876,9 +1924,67 @@ async function advanceTurn(pool, sessionId) {
   return nextTurn.actor_id;
 }
 
+async function ensureCurrentActorAlive(pool, sessionId) {
+  let changed = false;
+
+  for (let guard = 0; guard < 24; guard += 1) {
+    const sessionResult = await pool.query(
+      'SELECT current_actor_id, turn_mode FROM game_sessions WHERE id = $1',
+      [sessionId],
+    );
+    const session = sessionResult.rows[0];
+
+    if (!session?.turn_mode) {
+      return changed;
+    }
+
+    const currentActorId = String(session.current_actor_id ?? '');
+    if (!currentActorId) {
+      const advanced = await advanceTurn(pool, sessionId);
+      if (!advanced) {
+        return changed;
+      }
+      changed = true;
+      continue;
+    }
+
+    if (currentActorId.startsWith('npc_')) {
+      return changed;
+    }
+
+    const characterResult = await pool.query(
+      `
+        SELECT is_active, hp_current
+        FROM game_characters
+        WHERE session_id = $1 AND id = $2
+        LIMIT 1
+      `,
+      [sessionId, currentActorId],
+    );
+    const character = characterResult.rows[0];
+    const isAlive =
+      character &&
+      Boolean(character.is_active) &&
+      Number(character.hp_current ?? 0) > 0;
+
+    if (isAlive) {
+      return changed;
+    }
+
+    const advanced = await advanceTurn(pool, sessionId);
+    if (!advanced) {
+      return changed;
+    }
+    changed = true;
+  }
+
+  return changed;
+}
+
 export function registerGameRoutes(app, { pool, readAuthUser = null }) {
   const service = new AiGameMasterService({ pool });
   const generationLocks = new Set();
+  const sessionQueues = new Map();
   const requireRpgAuth = (handler) =>
     asyncRoute(async (request, response, next) => {
       if (!readAuthUser) {
@@ -1904,6 +2010,36 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
     }
   }
 
+  function emitToUser(userId, event, payload) {
+    const io = app.get('io');
+    if (io) {
+      io.to(`user:${userId}`).emit(event, payload);
+    }
+  }
+
+  function lobbyInvitations(publicState) {
+    return Array.isArray(publicState?.lobby_invitations)
+      ? publicState.lobby_invitations
+      : [];
+  }
+
+  function pendingLobbyInvitation(publicState, playerId) {
+    return lobbyInvitations(publicState).find(
+      (invite) =>
+        String(invite?.to_player_id ?? '') === String(playerId) &&
+        invite?.status === 'pending',
+    );
+  }
+
+  function isParticipant(publicState, playerId) {
+    const id = String(playerId ?? '');
+    const participantIds = Array.isArray(publicState?.participant_player_ids)
+      ? publicState.participant_player_ids.map(String)
+      : [];
+
+    return participantIds.includes(id);
+  }
+
   async function withGenerationLock(lockKey, handler) {
     if (generationLocks.has(lockKey)) {
       throw makeHttpError(
@@ -1919,6 +2055,61 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       generationLocks.delete(lockKey);
     }
   }
+
+  async function withSessionQueue(sessionId, label, handler) {
+    const key = String(sessionId ?? '').trim();
+
+    if (!key) {
+      return handler();
+    }
+
+    const previous = sessionQueues.get(key) ?? Promise.resolve();
+    const queued = sessionQueues.has(key);
+
+    if (queued) {
+      emitToSession(key, 'game-session-queued', {
+        sessionId: key,
+        label,
+        queued: true,
+      });
+    }
+
+    let current;
+    current = previous
+      .catch(() => {
+        // Keep the queue moving after a failed request.
+      })
+      .then(async () => {
+        emitToSession(key, 'game-session-busy', {
+          sessionId: key,
+          label,
+          busy: true,
+        });
+
+        try {
+          return await handler();
+        } finally {
+          if (sessionQueues.get(key) === current) {
+            sessionQueues.delete(key);
+            emitToSession(key, 'game-session-busy', {
+              sessionId: key,
+              label,
+              busy: false,
+            });
+          }
+        }
+      });
+
+    sessionQueues.set(key, current);
+    return current;
+  }
+
+  const queuedRpgSessionRoute = (label, handler) =>
+    requireRpgAuth((request, response, next) =>
+      withSessionQueue(request.params.id, label, () =>
+        handler(request, response, next),
+      ),
+    );
 
   app.get('/api/game-sessions/available-games', (_request, response) => {
     response.json(getEnabledGames());
@@ -2017,8 +2208,19 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           username: request.authUser.username,
           role: 'Ведущий',
         },
-        ...invitedPlayers,
       ];
+      const initialInvitations = invitedPlayers.map((player) => ({
+        id: `invite_${randomUUID().slice(0, 12)}`,
+        session_id: null,
+        from_player_id: ownerPlayerId,
+        from_name: request.authUser.name ?? request.authUser.username ?? 'Ведущий',
+        to_player_id: player.id,
+        to_name: player.name,
+        to_username: player.username,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+        responded_at: null,
+      }));
 
       const generatedScenario = await withGenerationLock(
         `lobby:${ownerPlayerId}`,
@@ -2039,6 +2241,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           generatedScenario,
           ownerPlayerId,
           participants,
+          initialInvitations,
         );
         await client.query('COMMIT');
 
@@ -2058,6 +2261,13 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           choices: generatedScenario.choices,
           state,
         });
+        for (const invitation of initialInvitations) {
+          emitToUser(invitation.to_player_id, 'notification-created', {
+            type: 'lobby_invitation',
+            sessionId,
+            invitationId: invitation.id,
+          });
+        }
       } catch (error) {
         await client.query('ROLLBACK');
         throw error;
@@ -2069,7 +2279,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.post(
     '/api/game-sessions/:id/scenario/revise',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('scenario_revision', async (request, response) => {
       const sessionId = request.params.id;
       const playerId = String(request.authUser.id);
       const wish = normalizeString(request.body.wish);
@@ -2087,6 +2297,12 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       }
 
       const current = await getSessionPublic(pool, sessionId, playerId);
+
+      if (!isSessionOwner(current.game_state.public_state, playerId)) {
+        response.status(403).json({ message: 'Только ведущий может менять сценарий.' });
+        return;
+      }
+
       const selectedGame = current.game_state.public_state?.selected_game;
       const game = selectedGame?.id ? findAvailableGame(selectedGame.id) : null;
 
@@ -2125,7 +2341,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.post(
     '/api/game-sessions/:id/characters/generate',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('character_generation', async (request, response) => {
       const sessionId = request.params.id;
       const playerId = String(request.authUser.id);
       const publicState = await getSessionPublic(pool, sessionId, playerId);
@@ -2182,7 +2398,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       const created = await insertCharacterRow(
         pool,
         sessionId,
-        playerId,
+        'party',
         generated,
         publicState.map,
       );
@@ -2217,7 +2433,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       const created = await insertCharacterRow(
         pool,
         sessionId,
-        payload.player_id,
+        'party',
         character,
         session.map,
       );
@@ -2269,15 +2485,10 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         return;
       }
 
-      const ownerId = String(state.game_state.public_state.owner_player_id ?? '');
       const currentOwner = String(row.player_id ?? '');
+      const nextOwnerId = currentOwner === playerId ? 'party' : playerId;
 
-      if (
-        currentOwner &&
-        currentOwner !== playerId &&
-        currentOwner !== ownerId &&
-        currentOwner !== 'party'
-      ) {
+      if (currentOwner && currentOwner !== playerId && currentOwner !== 'party') {
         response.status(400).json({ message: 'Этот персонаж уже выбран.' });
         return;
       }
@@ -2289,7 +2500,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           WHERE id = $2 AND session_id = $3
           RETURNING *
         `,
-        [playerId, characterId, sessionId],
+        [nextOwnerId, characterId, sessionId],
       );
 
       await pool.query('UPDATE game_sessions SET updated_at = now() WHERE id = $1', [
@@ -2315,8 +2526,13 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       );
       const state = await getSessionPublic(pool, sessionId, playerId);
 
-      if (!isSessionOwner(state.game_state.public_state, playerId)) {
-        response.status(403).json({ message: 'Только ведущий может приглашать игроков.' });
+      if (!canUseSession(state.game_state.public_state, playerId)) {
+        response.status(403).json({ message: 'Это лобби недоступно.' });
+        return;
+      }
+
+      if (state.session.status === 'finished') {
+        response.status(400).json({ message: 'Игра уже завершена.' });
         return;
       }
 
@@ -2342,10 +2558,38 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
       }
 
       const publicState = state.game_state.public_state ?? {};
+
+      if (String(invited.id) === playerId) {
+        response.status(400).json({ message: 'Нельзя пригласить себя.' });
+        return;
+      }
+
+      if (isParticipant(publicState, invited.id)) {
+        response.status(409).json({ message: 'Игрок уже в партии.' });
+        return;
+      }
+
+      if (pendingLobbyInvitation(publicState, invited.id)) {
+        response.status(409).json({ message: 'Приглашение уже отправлено.' });
+        return;
+      }
+
+      const invitation = {
+        id: `invite_${randomUUID().slice(0, 12)}`,
+        session_id: sessionId,
+        from_player_id: playerId,
+        from_name: request.authUser.name ?? request.authUser.username ?? 'Ведущий',
+        to_player_id: invited.id,
+        to_name: invited.name,
+        to_username: invited.username,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+        responded_at: null,
+      };
+      const invitations = [...lobbyInvitations(publicState), invitation];
       const participantIds = uniqueStrings([
         ...(publicState.participant_player_ids ?? []),
         playerId,
-        invited.id,
       ]);
       const participantsById = new Map(
         (publicState.participants ?? []).map((participant) => [
@@ -2353,12 +2597,6 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           participant,
         ]),
       );
-      participantsById.set(invited.id, {
-        id: invited.id,
-        name: invited.name,
-        username: invited.username,
-        role: 'Игрок',
-      });
 
       await pool.query(
         `
@@ -2371,6 +2609,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           JSON.stringify({
             participant_player_ids: participantIds,
             participants: [...participantsById.values()],
+            lobby_invitations: invitations,
           }),
           sessionId,
         ],
@@ -2381,13 +2620,189 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
       const updated = await getSessionPublic(pool, sessionId, playerId);
       emitToSession(sessionId, 'game-session-updated', updated);
+      emitToUser(invited.id, 'notification-created', {
+        type: 'lobby_invitation',
+        sessionId,
+        invitationId: invitation.id,
+      });
       response.json({ session: updated });
+    }),
+  );
+
+  app.post(
+    '/api/game-sessions/:id/invitations/:invitationId/respond',
+    queuedRpgSessionRoute('invitation_response', async (request, response) => {
+      const sessionId = request.params.id;
+      const invitationId = request.params.invitationId;
+      const playerId = String(request.authUser.id);
+      const status = normalizeString(request.body.status);
+
+      if (status !== 'accepted' && status !== 'declined') {
+        response
+          .status(400)
+          .json({ message: 'Выберите: принять или отклонить приглашение.' });
+        return;
+      }
+
+      const current = await getSessionPublic(pool, sessionId, playerId);
+      const publicState = current.game_state.public_state ?? {};
+      const invitations = lobbyInvitations(publicState);
+      const invitation = invitations.find(
+        (item) =>
+          item.id === invitationId &&
+          String(item.to_player_id ?? '') === playerId &&
+          item.status === 'pending',
+      );
+
+      if (!invitation) {
+        response.status(404).json({ message: 'Активное приглашение не найдено.' });
+        return;
+      }
+
+      const nextInvitations = invitations.map((item) =>
+        item.id === invitationId
+          ? { ...item, status, responded_at: new Date().toISOString() }
+          : item,
+      );
+      const ownerId = String(publicState.owner_player_id ?? '');
+      let participantIds = publicState.participant_player_ids ?? [];
+      let participants = publicState.participants ?? [];
+
+      if (status === 'accepted') {
+        participantIds = uniqueStrings([...participantIds, ownerId, playerId]);
+        const participantsById = new Map(
+          participants.map((participant) => [String(participant.id), participant]),
+        );
+        participantsById.set(playerId, {
+          id: playerId,
+          name: request.authUser.name ?? invitation.to_name ?? 'Игрок',
+          username: request.authUser.username ?? invitation.to_username,
+          role: 'Игрок',
+        });
+        participants = [...participantsById.values()];
+      }
+
+      await pool.query(
+        `
+          UPDATE game_states
+          SET public_state_json = public_state_json || $1::jsonb,
+              updated_at = now()
+          WHERE session_id = $2
+        `,
+        [
+          JSON.stringify({
+            participant_player_ids: participantIds,
+            participants,
+            lobby_invitations: nextInvitations,
+          }),
+          sessionId,
+        ],
+      );
+      await pool.query('UPDATE game_sessions SET updated_at = now() WHERE id = $1', [
+        sessionId,
+      ]);
+
+      const updatedForPlayer = await getSessionPublic(pool, sessionId, playerId);
+      const ownerSession = ownerId
+        ? await getSessionPublic(pool, sessionId, ownerId)
+        : updatedForPlayer;
+      emitToSession(sessionId, 'game-session-updated', ownerSession);
+      emitToUser(playerId, 'notifications-updated', {
+        type: 'lobby_invitation_responded',
+        sessionId,
+        invitationId,
+        status,
+      });
+      if (ownerId) {
+        emitToUser(ownerId, 'notifications-updated', {
+          type: 'lobby_invitation_responded',
+          sessionId,
+          invitationId,
+          status,
+        });
+      }
+
+      response.json({ session: updatedForPlayer, status });
+    }),
+  );
+
+  app.post(
+    '/api/game-sessions/:id/characters/:characterId/assign',
+    queuedRpgSessionRoute('character_assign', async (request, response) => {
+      const sessionId = request.params.id;
+      const characterId = request.params.characterId;
+      const ownerId = String(request.authUser.id);
+      const assigneeId = normalizeString(
+        request.body.player_id ?? request.body.playerId,
+      );
+      const state = await getSessionPublic(pool, sessionId, ownerId);
+
+      if (!isSessionOwner(state.game_state.public_state, ownerId)) {
+        response
+          .status(403)
+          .json({ message: 'Только ведущий может назначать персонажей.' });
+        return;
+      }
+
+      if (state.session.status === 'finished') {
+        response.status(400).json({ message: 'Игра уже завершена.' });
+        return;
+      }
+
+      const character = state.characters.find((item) => item.id === characterId);
+
+      if (!character) {
+        response.status(404).json({ message: 'Персонаж не найден.' });
+        return;
+      }
+
+      const allowedIds = new Set([
+        ownerId,
+        'party',
+        ...(state.game_state.public_state.participant_player_ids ?? []).map(String),
+      ]);
+      const nextOwnerId = assigneeId || 'party';
+
+      if (!allowedIds.has(nextOwnerId)) {
+        response
+          .status(400)
+          .json({ message: 'Назначать можно только участникам партии.' });
+        return;
+      }
+
+      const result = await pool.query(
+        `
+          UPDATE game_characters
+          SET player_id = $1, updated_at = now()
+          WHERE id = $2 AND session_id = $3
+          RETURNING *
+        `,
+        [nextOwnerId, characterId, sessionId],
+      );
+      await pool.query('UPDATE game_sessions SET updated_at = now() WHERE id = $1', [
+        sessionId,
+      ]);
+
+      const updated = await getSessionPublic(pool, sessionId, ownerId);
+      emitToSession(sessionId, 'game-session-updated', updated);
+      if (nextOwnerId !== 'party') {
+        emitToUser(nextOwnerId, 'notifications-updated', {
+          type: 'character_assigned',
+          sessionId,
+          characterId,
+        });
+      }
+
+      response.json({
+        character: toPublicCharacterV2(result.rows[0], ownerId),
+        session: updated,
+      });
     }),
   );
 
   app.patch(
     '/api/game-sessions/:id/characters/:characterId',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('character_update', async (request, response) => {
       const sessionId = request.params.id;
       const characterId = request.params.characterId;
       const playerId = String(request.authUser.id);
@@ -2403,11 +2818,12 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         return;
       }
 
-      if (
-        playerId &&
-        String(row.player_id) !== playerId &&
-        !isSessionOwner(state.game_state.public_state, playerId)
-      ) {
+      const isOwner = isSessionOwner(state.game_state.public_state, playerId);
+      const canEditInDraft =
+        state.session.status === 'draft' &&
+        canUseSession(state.game_state.public_state, playerId);
+
+      if (!canEditInDraft && playerId && String(row.player_id) !== playerId && !isOwner) {
         response.status(403).json({ message: 'Этого персонажа нельзя изменить.' });
         return;
       }
@@ -2449,9 +2865,10 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
             hp_current = $10,
             hp_max = $11,
             inventory_json = $12,
-            status_effects_json = $13,
+        status_effects_json = $13,
+            is_active = $14,
             updated_at = now()
-          WHERE id = $14 AND session_id = $15
+          WHERE id = $15 AND session_id = $16
           RETURNING *
         `,
         [
@@ -2468,6 +2885,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           merged.derived.hp_max,
           JSON.stringify(merged.inventory),
           JSON.stringify(merged.status_effects),
+          merged.is_active ?? true,
           characterId,
           sessionId,
         ],
@@ -2484,7 +2902,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.post(
     '/api/game-sessions/:id/characters/:characterId/revise',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('character_revision', async (request, response) => {
       const sessionId = request.params.id;
       const characterId = request.params.characterId;
       const playerId = String(request.authUser.id);
@@ -2569,8 +2987,9 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
             hp_max = $11,
             inventory_json = $12,
             status_effects_json = $13,
+            is_active = $14,
             updated_at = now()
-          WHERE id = $14 AND session_id = $15
+          WHERE id = $15 AND session_id = $16
           RETURNING *
         `,
         [
@@ -2587,6 +3006,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
           revised.derived.hp_max,
           JSON.stringify(revised.inventory),
           JSON.stringify(revised.status_effects),
+          revised.is_active ?? true,
           characterId,
           sessionId,
         ],
@@ -2607,7 +3027,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.delete(
     '/api/game-sessions/:id/characters/:characterId',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('character_delete', async (request, response) => {
       const sessionId = request.params.id;
       const characterId = request.params.characterId;
       const playerId = String(request.authUser.id);
@@ -2660,7 +3080,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.post(
     '/api/game-sessions/:id/start',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('session_start', async (request, response) => {
       const sessionId = request.params.id;
       const playerId = String(request.authUser.id);
       const state = await getSessionPublic(pool, sessionId, playerId);
@@ -2694,7 +3114,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.post(
     '/api/game-sessions/:id/finish',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('session_finish', async (request, response) => {
       const sessionId = request.params.id;
       const playerId = String(request.authUser.id);
 
@@ -2747,6 +3167,17 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
   app.get(
     '/api/game-sessions/:id/messages',
     requireRpgAuth(async (request, response) => {
+      const state = await getSessionPublic(
+        pool,
+        request.params.id,
+        String(request.authUser.id),
+      );
+
+      if (!canUseSession(state.game_state.public_state, String(request.authUser.id))) {
+        response.status(403).json({ message: 'Это лобби недоступно.' });
+        return;
+      }
+
       const result = await pool.query(
         `
           SELECT *
@@ -2761,11 +3192,102 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
   );
 
   app.post(
-    '/api/game-sessions/:id/messages',
-    requireRpgAuth(async (request, response) => {
+    '/api/game-sessions/:id/messages/trim',
+    queuedRpgSessionRoute('chat_trim', async (request, response) => {
       const sessionId = request.params.id;
       const playerId = String(request.authUser.id);
-      const characterId = normalizeString(request.body.character_id);
+      const removeCount = clamp(request.body?.count ?? 6, 1, 30);
+      const state = await getSessionPublic(pool, sessionId, playerId);
+
+      if (!canUseSession(state.game_state.public_state, playerId)) {
+        response.status(403).json({ message: 'Это лобби недоступно.' });
+        return;
+      }
+
+      if (state.session.status === 'finished') {
+        response.status(409).json({ message: 'Игра уже завершена.' });
+        return;
+      }
+
+      await pool.query(
+        `
+          DELETE FROM game_messages
+          WHERE id IN (
+            SELECT id
+            FROM game_messages
+            WHERE session_id = $1
+              AND visible_to_players = true
+            ORDER BY created_at DESC
+            LIMIT $2
+          )
+        `,
+        [sessionId, removeCount],
+      );
+
+      await pool.query('UPDATE game_sessions SET updated_at = now() WHERE id = $1', [
+        sessionId,
+      ]);
+
+      const updated = await getSessionPublic(pool, sessionId, playerId);
+      emitToSession(sessionId, 'game-session-updated', updated);
+      response.json({
+        removed: removeCount,
+        state: updated,
+      });
+    }),
+  );
+
+  app.post(
+    '/api/game-sessions/:id/messages/delete',
+    queuedRpgSessionRoute('chat_trim', async (request, response) => {
+      const sessionId = request.params.id;
+      const playerId = String(request.authUser.id);
+      const state = await getSessionPublic(pool, sessionId, playerId);
+      const ids = Array.isArray(request.body?.message_ids)
+        ? request.body.message_ids.map((value) => normalizeString(value)).filter(Boolean)
+        : [];
+
+      if (!canUseSession(state.game_state.public_state, playerId)) {
+        response.status(403).json({ message: 'Это лобби недоступно.' });
+        return;
+      }
+
+      if (!ids.length) {
+        response.status(400).json({ message: 'Выберите сообщения для удаления.' });
+        return;
+      }
+
+      const limitedIds = uniqueStrings(ids).slice(0, 50);
+      const deleted = await pool.query(
+        `
+          DELETE FROM game_messages
+          WHERE session_id = $1
+            AND id = ANY($2::text[])
+            AND visible_to_players = true
+          RETURNING id
+        `,
+        [sessionId, limitedIds],
+      );
+
+      await pool.query('UPDATE game_sessions SET updated_at = now() WHERE id = $1', [
+        sessionId,
+      ]);
+
+      const updated = await getSessionPublic(pool, sessionId, playerId);
+      emitToSession(sessionId, 'game-session-updated', updated);
+      response.json({
+        removed: deleted.rowCount ?? 0,
+        state: updated,
+      });
+    }),
+  );
+
+  app.post(
+    '/api/game-sessions/:id/messages',
+    queuedRpgSessionRoute('game_action', async (request, response) => {
+      const sessionId = request.params.id;
+      const playerId = String(request.authUser.id);
+      let characterId = normalizeString(request.body.character_id);
       const content = normalizeString(request.body.content);
 
       if (!playerId || !characterId) {
@@ -2792,17 +3314,67 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         return;
       }
 
-      const session = await getSessionPublic(pool, sessionId, playerId);
+      let session = await getSessionPublic(pool, sessionId, playerId);
 
       if (session.session.status === 'finished') {
         response.status(409).json({ message: 'Игра уже завершена.' });
         return;
       }
 
-      const character = session.characters.find((item) => item.id === characterId);
+      if (session.session.turn_mode) {
+        const currentActorId = String(session.session.current_actor_id ?? '');
+        const currentCharacter = session.characters.find(
+          (item) => item.id === currentActorId,
+        );
+        const currentNpc = session.npcs.find((item) => item.id === currentActorId);
+        const invalidCurrentActor =
+          !currentActorId ||
+          (!currentCharacter && !currentNpc) ||
+          (currentCharacter &&
+            (!currentCharacter.is_active || currentCharacter.derived?.hp_current <= 0));
+
+        if (invalidCurrentActor) {
+          const nextActorId = await advanceTurn(pool, sessionId);
+          if (nextActorId) {
+            session = await getSessionPublic(pool, sessionId, playerId);
+            emitToSession(sessionId, 'game-turn-updated', session);
+            emitToSession(sessionId, 'game-session-updated', session);
+          }
+        }
+      }
+
+      let character = session.characters.find((item) => item.id === characterId);
+
+      if (
+        session.session.turn_mode &&
+        session.session.current_actor_id &&
+        session.session.current_actor_id !== characterId
+      ) {
+        const currentActor = session.characters.find(
+          (item) => item.id === session.session.current_actor_id,
+        );
+        if (currentActor && String(currentActor.player_id) === playerId) {
+          characterId = currentActor.id;
+          character = currentActor;
+        }
+      }
 
       if (!character) {
         response.status(404).json({ message: 'Персонаж не найден.' });
+        return;
+      }
+
+      if (!character.is_active || Number(character.derived?.hp_current ?? 0) <= 0) {
+        const moved = await ensureCurrentActorAlive(pool, sessionId);
+        const refreshed = await getSessionPublic(pool, sessionId, playerId);
+        if (moved) {
+          emitToSession(sessionId, 'game-turn-updated', refreshed);
+          emitToSession(sessionId, 'game-session-updated', refreshed);
+        }
+        response.status(409).json({
+          message:
+            'Этот персонаж погиб и больше не может действовать. Выберите живого персонажа.',
+        });
         return;
       }
 
@@ -2811,15 +3383,47 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         return;
       }
 
-      if (
+      const isOutOfTurnAction =
         session.session.turn_mode &&
         session.session.current_actor_id !== characterId &&
         !isAllowedCommand(content) &&
-        !isSpeechOnly(content)
-      ) {
-        response.status(409).json({
-          message:
-            'Это действие относится к другому персонажу. Дождись своего хода или опиши реплику без игрового действия.',
+        !isSpeechOnly(content);
+
+      if (isOutOfTurnAction) {
+        const currentTurnActorId =
+          session.turns.find((turn) => turn.is_current)?.actor_id ??
+          session.session.current_actor_id ??
+          '';
+        const currentActorName =
+          session.characters.find((item) => item.id === currentTurnActorId)
+            ?.name ??
+          session.npcs.find((item) => item.id === currentTurnActorId)
+            ?.name ??
+          (currentTurnActorId ? `персонаж ${currentTurnActorId}` : 'другого персонажа');
+        const playerMessage = await createGameMessage(pool, {
+          session_id: sessionId,
+          player_id: playerId,
+          character_id: characterId,
+          role: 'player',
+          content,
+        });
+        const gmMessage = await createGameMessage(pool, {
+          session_id: sessionId,
+          role: 'gm',
+          content:
+            `Реплика принята. Сейчас ожидается ход: ${currentActorName}. Игровое действие отложено до вашего хода.`,
+        });
+        const updatedState = await getSessionPublic(pool, sessionId, playerId);
+        emitToSession(sessionId, 'game-message-created', {
+          player_message: playerMessage,
+          gm_message: gmMessage,
+        });
+        response.json({
+          player_message: playerMessage,
+          gm_message: gmMessage,
+          state: updatedState,
+          choices: session.game_state.public_state?.current_choices ?? fallbackChoices(),
+          warning: 'out_of_turn_as_speech',
         });
         return;
       }
@@ -2935,9 +3539,13 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         processed.mapPatch,
         processed.choices,
       );
+      const movedAfterPatch = await ensureCurrentActorAlive(pool, sessionId);
       await maybeSummarize(service, pool, sessionId);
 
       const updatedState = await getSessionPublic(pool, sessionId, playerId);
+      if (movedAfterPatch) {
+        emitToSession(sessionId, 'game-turn-updated', updatedState);
+      }
       emitToSession(sessionId, 'game-message-created', {
         player_message: playerMessage,
         gm_message: gmMessage,
@@ -3016,7 +3624,7 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
 
   app.patch(
     '/api/game-sessions/:id/map/tokens/:tokenId',
-    requireRpgAuth(async (request, response) => {
+    queuedRpgSessionRoute('map_token_move', async (request, response) => {
       const sessionId = request.params.id;
       const tokenId = request.params.tokenId;
       const playerId = String(request.authUser.id);

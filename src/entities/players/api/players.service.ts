@@ -1,5 +1,10 @@
 import { localRequest } from '../../../shared/api/http';
-import { FriendRequestsState, LobbyState, Player } from '../model/types';
+import {
+  FriendRequestsState,
+  LobbyState,
+  NotificationsState,
+  Player,
+} from '../model/types';
 
 export const playersService = {
   list() {
@@ -62,5 +67,11 @@ export const lobbyService = {
       method: 'PATCH',
       body: JSON.stringify({ placement }),
     });
+  },
+};
+
+export const notificationsService = {
+  get() {
+    return localRequest<NotificationsState>('/notifications');
   },
 };
