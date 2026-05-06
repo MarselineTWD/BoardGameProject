@@ -7,7 +7,7 @@ import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   {
-    ignores: ['dist', 'node_modules'],
+    ignores: ['.deploy/**', 'dist/**', 'node_modules/**'],
   },
   {
     files: ['scripts/**/*.{js,mjs}', 'server/**/*.{js,mjs}'],

@@ -1153,55 +1153,101 @@ ${wish}
         'Персонаж выбирает действие.',
     });
 
-    const raw = await this.complete(
+    const payload = JSON.stringify({
+      scenario: context.publicState.scenario ?? context.publicState.campaign,
+      deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
+      online_session_scope: {
+        session_id: sessionId,
+        deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
+        isolation_policy:
+          'Эта игровая сессия является отдельным чатом. Не используй события, персонажей, память или скрытые заметки из других session_id.',
+      },
+      selected_game: context.publicState.selected_game ?? null,
+      characters: context.characters,
+      current_active_character: context.currentCharacter,
+      game_state:
+        context.publicState.game_state ??
+        context.publicState.public_state?.game_state ??
+        {},
+      map_state: context.mapState,
+      conversation_memory: {
+        summary_short: context.state.summary_short,
+        summary_long: context.state.summary_long,
+        important_facts: context.state.important_facts_json ?? [],
+        unresolved_threads: context.state.unresolved_threads_json ?? [],
+      },
+      last_messages: context.lastMessages,
+      player_action: protectedPlayerMessage,
+      choice: actionPayload?.choice ?? null,
+      roll_result: actionPayload?.roll_result ?? null,
+      current_choices: context.publicState.current_choices ?? [],
+      player_id: playerId,
+    });
+    const messages = [
+      {
+        role: 'system',
+        content: GAME_MASTER_JSON_PROMPT,
+      },
+      {
+        role: 'user',
+        content: payload,
+      },
+    ];
+
+    const raw = await this.complete(messages, {
+      json: true,
+      temperature: 0.55,
+      maxTokens: this.maxOutputTokens,
+      purpose: 'processGameAction',
+    });
+    let parsed = parseDeepSeekGameResponse(raw);
+    if (!parsed.parseError) {
+      return parsed;
+    }
+
+    console.warn(
+      '[DeepSeek] processGameAction parse fallback, trying JSON repair. rawLength=',
+      String(raw ?? '').length,
+    );
+
+    try {
+      const repaired = await this.repairJson(raw, 'Invalid GameMasterResponse JSON');
+      parsed = parseDeepSeekGameResponse(JSON.stringify(repaired));
+      if (!parsed.parseError) {
+        console.warn('[DeepSeek] processGameAction recovered via repairJson');
+        return parsed;
+      }
+    } catch (error) {
+      console.warn(
+        '[DeepSeek] processGameAction repairJson failed:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    const retryRaw = await this.complete(
       [
-        {
-          role: 'system',
-          content: GAME_MASTER_JSON_PROMPT,
-        },
+        ...messages,
         {
           role: 'user',
-          content: JSON.stringify({
-            scenario: context.publicState.scenario ?? context.publicState.campaign,
-            deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
-            online_session_scope: {
-              session_id: sessionId,
-              deepseek_chat_id: context.publicState.deepseek_chat_id ?? sessionId,
-              isolation_policy:
-                'Эта игровая сессия является отдельным чатом. Не используй события, персонажей, память или скрытые заметки из других session_id.',
-            },
-            selected_game: context.publicState.selected_game ?? null,
-            characters: context.characters,
-            current_active_character: context.currentCharacter,
-            game_state:
-              context.publicState.game_state ??
-              context.publicState.public_state?.game_state ??
-              {},
-            map_state: context.mapState,
-            conversation_memory: {
-              summary_short: context.state.summary_short,
-              summary_long: context.state.summary_long,
-              important_facts: context.state.important_facts_json ?? [],
-              unresolved_threads: context.state.unresolved_threads_json ?? [],
-            },
-            last_messages: context.lastMessages,
-            player_action: protectedPlayerMessage,
-            choice: actionPayload?.choice ?? null,
-            roll_result: actionPayload?.roll_result ?? null,
-            current_choices: context.publicState.current_choices ?? [],
-            player_id: playerId,
-          }),
+          content:
+            'Повтори ответ строго валидным JSON по схеме. Никакого markdown и никаких пояснений вне JSON.',
         },
       ],
       {
         json: true,
-        temperature: 0.55,
+        temperature: 0.3,
         maxTokens: this.maxOutputTokens,
-        purpose: 'processGameAction',
+        purpose: 'processGameAction_retry_parse',
       },
     );
-
-    return parseDeepSeekGameResponse(raw);
+    parsed = parseDeepSeekGameResponse(retryRaw);
+    if (parsed.parseError) {
+      console.warn(
+        '[DeepSeek] processGameAction retry_parse failed. retryRawLength=',
+        String(retryRaw ?? '').length,
+      );
+    }
+    return parsed;
   }
 
   async answerGameQuestion(sessionId, playerId, question) {

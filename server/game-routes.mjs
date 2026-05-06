@@ -3559,6 +3559,17 @@ export function registerGameRoutes(app, { pool, readAuthUser = null }) {
         choices: processed.choices,
         parse_error: processed.parseError,
       });
+      if (processed.parseError) {
+        console.warn(
+          '[DeepSeek] parse_error surfaced to client',
+          JSON.stringify({
+            session_id: sessionId,
+            player_id: playerId,
+            character_id: characterId,
+            action_preview: String(content).slice(0, 120),
+          }),
+        );
+      }
     }),
   );
 
