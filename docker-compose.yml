@@ -25,9 +25,7 @@ services:
     image: dpage/pgadmin4:9
     container_name: boardgameproject-pgadmin
     restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@meeplescope.dev}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-227291}
+
     ports:
       - '5050:80'
     volumes:
